@@ -25,12 +25,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' tauri: asset:; connect-src 'self' ipc: http://127.0.0.1:* http://localhost:* https://api.openai.com https:; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "icon": ["icons/icon.ico"],
     "resources": {
+      "../python-agent/dist/novelforge-agent": "python-agent/novelforge-agent",
       "../python-agent/agent.py": "python-agent/agent.py",
       "../python-agent/app.py": "python-agent/app.py",
       "../python-agent/database.py": "python-agent/database.py",

@@ -35,7 +35,9 @@ pub(crate) fn database_path() -> Result<PathBuf, String> {
         }
     }
     #[cfg(target_os = "windows")]
-    let root = env::var("APPDATA").map(PathBuf::from).map_err(|error| error.to_string())?;
+    let root = env::var("APPDATA")
+        .map(PathBuf::from)
+        .map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
     let root = PathBuf::from(env::var("HOME").map_err(|error| error.to_string())?)
         .join("Library")
@@ -43,7 +45,9 @@ pub(crate) fn database_path() -> Result<PathBuf, String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let root = env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".local/share"));
+        .unwrap_or_else(|_| {
+            PathBuf::from(env::var("HOME").unwrap_or_default()).join(".local/share")
+        });
     Ok(root
         .join("NovelForge")
         .join("storage")
@@ -181,15 +185,21 @@ pub fn write_file(
 
 #[tauri::command]
 pub fn save_app_state(app: AppHandle, key: String, value: String) -> Result<(), String> {
-    let store = app.store("window-state.json").map_err(|error| error.to_string())?;
+    let store = app
+        .store("window-state.json")
+        .map_err(|error| error.to_string())?;
     store.set(key, value);
     store.save().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn load_app_state(app: AppHandle, key: String) -> Result<Option<String>, String> {
-    let store = app.store("window-state.json").map_err(|error| error.to_string())?;
-    Ok(store.get(key).and_then(|value| value.as_str().map(str::to_string)))
+    let store = app
+        .store("window-state.json")
+        .map_err(|error| error.to_string())?;
+    Ok(store
+        .get(key)
+        .and_then(|value| value.as_str().map(str::to_string)))
 }
 
 #[cfg(windows)]
@@ -197,17 +207,40 @@ fn protect_value(value: &str) -> Result<String, String> {
     use std::ptr;
     use std::slice;
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
     let bytes = value.as_bytes();
-    let mut input = CRYPT_INTEGER_BLOB { cbData: bytes.len().try_into().map_err(|_| "configuration is too large")?, pbData: bytes.as_ptr() as *mut u8 };
-    let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: ptr::null_mut() };
-    let success = unsafe { CryptProtectData(&mut input, ptr::null(), ptr::null(), ptr::null(), ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output) };
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: bytes
+            .len()
+            .try_into()
+            .map_err(|_| "configuration is too large")?,
+        pbData: bytes.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+    let success = unsafe {
+        CryptProtectData(
+            &input,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
     if success == 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
     let protected = unsafe { slice::from_raw_parts(output.pbData, output.cbData as usize) };
     let encoded = BASE64.encode(protected);
-    unsafe { LocalFree(output.pbData.cast()); }
+    unsafe {
+        LocalFree(output.pbData.cast());
+    }
     Ok(encoded)
 }
 
@@ -216,17 +249,42 @@ fn unprotect_value(value: &str) -> Result<String, String> {
     use std::ptr;
     use std::slice;
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
-    let mut encrypted = BASE64.decode(value).map_err(|_| "invalid encrypted configuration")?;
-    let mut input = CRYPT_INTEGER_BLOB { cbData: encrypted.len().try_into().map_err(|_| "configuration is too large")?, pbData: encrypted.as_mut_ptr() };
-    let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: ptr::null_mut() };
-    let success = unsafe { CryptUnprotectData(&mut input, ptr::null_mut(), ptr::null(), ptr::null(), ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output) };
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+    let mut encrypted = BASE64
+        .decode(value)
+        .map_err(|_| "invalid encrypted configuration")?;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: encrypted
+            .len()
+            .try_into()
+            .map_err(|_| "configuration is too large")?,
+        pbData: encrypted.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+    let success = unsafe {
+        CryptUnprotectData(
+            &input,
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
     if success == 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
     let decrypted = unsafe { slice::from_raw_parts(output.pbData, output.cbData as usize) };
     let result = String::from_utf8(decrypted.to_vec()).map_err(|error| error.to_string());
-    unsafe { LocalFree(output.pbData.cast()); }
+    unsafe {
+        LocalFree(output.pbData.cast());
+    }
     result
 }
 
@@ -237,20 +295,25 @@ fn protect_value(value: &str) -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn unprotect_value(value: &str) -> Result<String, String> {
-    String::from_utf8(BASE64.decode(value).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+    String::from_utf8(BASE64.decode(value).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn save_api_profiles(app: AppHandle, value: String) -> Result<(), String> {
     let encrypted = protect_value(&value)?;
-    let store = app.store("settings.json").map_err(|error| error.to_string())?;
+    let store = app
+        .store("settings.json")
+        .map_err(|error| error.to_string())?;
     store.set(API_PROFILES_KEY, encrypted);
     store.save().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn load_api_profiles(app: AppHandle) -> Result<Option<String>, String> {
-    let store = app.store("settings.json").map_err(|error| error.to_string())?;
+    let store = app
+        .store("settings.json")
+        .map_err(|error| error.to_string())?;
     let stored = store
         .get(API_PROFILES_KEY)
         .and_then(|value| value.as_str().map(str::to_string))
@@ -286,7 +349,20 @@ pub fn load_api_profiles(app: AppHandle) -> Result<Option<String>, String> {
     if let Some(value) = &decrypted {
         store.set(API_PROFILES_KEY, protect_value(value)?);
         store.save().map_err(|error| error.to_string())?;
-        connection.execute("DROP TABLE configs", []).map_err(|error| error.to_string())?;
+        connection
+            .execute("DROP TABLE configs", [])
+            .map_err(|error| error.to_string())?;
     }
     Ok(decrypted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_file_name;
+
+    #[test]
+    fn exported_file_name_removes_unsafe_characters() {
+        assert_eq!(safe_file_name("作品<终稿>.docx", "pdf"), "作品_终稿_.pdf");
+        assert_eq!(safe_file_name("普通标题", "txt"), "普通标题.txt");
+    }
 }

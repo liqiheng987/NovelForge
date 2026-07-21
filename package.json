@@ -2,7 +2,14 @@
   "name": "novelforge",
   "private": true,
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build:agent": "powershell -ExecutionPolicy Bypass -File scripts/build-agent.ps1",
+    "build": "pnpm build:agent && pnpm tauri build",
+    "build:web": "pnpm --dir web-frontend build",
+    "test:python": "python -m unittest discover -s python-agent/tests -p \"test_*.py\" -v",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "pnpm test:python && pnpm build:web && pnpm test:rust"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.5.0"
