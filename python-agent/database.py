@@ -59,6 +59,7 @@ MATERIAL_NODE_LABELS = {
 MATERIAL_CONTEXT_LIMIT = 150000
 CHAPTER_CONTEXT_LIMIT = 150000
 CHAPTER_SUMMARY_LIMIT = 1200
+CHAPTER_VERSION_RETENTION = 50
 BACKUP_RETENTION = 7
 CHAPTER_MEMORY_LIST_FIELDS = (
     "key_events",
@@ -288,6 +289,23 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
             updated_at DATETIME NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS chapter_versions (
+            id TEXT PRIMARY KEY,
+            chapter_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            session_id TEXT,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            memory TEXT NOT NULL DEFAULT '{}',
+            sort_order INTEGER NOT NULL,
+            event_type TEXT NOT NULL CHECK (event_type IN ('edit','ai_edit','restore','delete')),
+            chapter_created_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            restored_at DATETIME,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS pinned_materials (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -406,6 +424,8 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id,last_accessed);
         CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_chapters_project_order ON chapters(project_id,sort_order);
+        CREATE INDEX IF NOT EXISTS idx_chapter_versions_chapter ON chapter_versions(chapter_id,created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chapter_versions_trash ON chapter_versions(project_id,event_type,restored_at,created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_pinned_project ON pinned_materials(project_id,priority);
         CREATE INDEX IF NOT EXISTS idx_universe_project ON universe_rules(project_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_fact_project_category ON fact_tables(project_id,category);
@@ -1010,6 +1030,203 @@ def chapter_record(row: sqlite3.Row) -> dict[str, Any]:
     return record
 
 
+def chapter_version_record(row: sqlite3.Row) -> dict[str, Any]:
+    record = dict(row)
+    try:
+        memory = json.loads(record.get("memory") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        memory = {}
+    record["memory"] = memory if isinstance(memory, dict) else {}
+    return record
+
+
+def save_chapter_version(
+    connection: sqlite3.Connection,
+    chapter: sqlite3.Row,
+    event_type: str,
+) -> str:
+    version_id = str(uuid4())
+    connection.execute(
+        """
+        INSERT INTO chapter_versions (
+            id,chapter_id,project_id,session_id,title,content,summary,memory,sort_order,
+            event_type,chapter_created_at,created_at,restored_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+        """,
+        (
+            version_id,
+            chapter["id"],
+            chapter["project_id"],
+            chapter["session_id"],
+            chapter["title"],
+            chapter["content"],
+            chapter["summary"] or "",
+            chapter["memory"] or "{}",
+            chapter["sort_order"],
+            event_type,
+            chapter["created_at"],
+            now(),
+        ),
+    )
+    if event_type != "delete":
+        stale_versions = connection.execute(
+            """
+            SELECT id FROM chapter_versions
+            WHERE chapter_id=? AND event_type<>'delete'
+            ORDER BY created_at DESC, id DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (chapter["id"], CHAPTER_VERSION_RETENTION),
+        ).fetchall()
+        connection.executemany(
+            "DELETE FROM chapter_versions WHERE id=?",
+            [(row["id"],) for row in stale_versions],
+        )
+    return version_id
+
+
+def list_chapter_versions(chapter_id: str) -> list[dict[str, Any]]:
+    with closing(connect()) as connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM chapter_versions
+            WHERE chapter_id=? AND event_type<>'delete'
+            ORDER BY created_at DESC, id DESC
+            """,
+            (chapter_id,),
+        ).fetchall()
+    return [chapter_version_record(row) for row in rows]
+
+
+def list_deleted_chapters(project_id: str) -> list[dict[str, Any]]:
+    with closing(connect()) as connection:
+        if not connection.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise ValueError("作品不存在")
+        rows = connection.execute(
+            """
+            SELECT * FROM chapter_versions
+            WHERE project_id=? AND event_type='delete' AND restored_at IS NULL
+            ORDER BY created_at DESC, id DESC
+            """,
+            (project_id,),
+        ).fetchall()
+    return [chapter_version_record(row) for row in rows]
+
+
+def restore_chapter_version(version_id: str) -> dict[str, Any]:
+    with closing(connect()) as connection:
+        with connection:
+            version = connection.execute(
+                "SELECT * FROM chapter_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            if not version:
+                raise ValueError("章节版本不存在")
+            project_id = str(version["project_id"])
+            current = connection.execute(
+                "SELECT * FROM chapters WHERE id=?", (version["chapter_id"],)
+            ).fetchone()
+            restored_from_deleted = str(version["event_type"]) == "delete"
+            if restored_from_deleted:
+                if version["restored_at"]:
+                    raise ValueError("该章节已经恢复")
+                if current:
+                    raise ValueError("同一章节已经存在")
+                session = connection.execute(
+                    "SELECT id FROM sessions WHERE id=? AND project_id=?",
+                    (version["session_id"], project_id),
+                ).fetchone()
+                if not session:
+                    session = connection.execute(
+                        "SELECT id FROM sessions WHERE project_id=? ORDER BY last_accessed DESC LIMIT 1",
+                        (project_id,),
+                    ).fetchone()
+                if not session:
+                    raise ValueError("作品没有可用会话，无法恢复章节")
+                chapter_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM chapters WHERE project_id=?", (project_id,)
+                    ).fetchone()[0]
+                )
+                sort_order = max(1, min(int(version["sort_order"]), chapter_count + 1))
+                connection.execute(
+                    "UPDATE chapters SET sort_order=sort_order+1 WHERE project_id=? AND sort_order>=?",
+                    (project_id, sort_order),
+                )
+                timestamp = now()
+                connection.execute(
+                    """
+                    INSERT INTO chapters (
+                        id,session_id,project_id,title,content,summary,memory,sort_order,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        version["chapter_id"],
+                        session["id"],
+                        project_id,
+                        version["title"],
+                        version["content"],
+                        version["summary"],
+                        version["memory"],
+                        sort_order,
+                        version["chapter_created_at"],
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE chapter_versions SET restored_at=? WHERE id=?",
+                    (timestamp, version_id),
+                )
+            else:
+                if not current:
+                    raise ValueError("章节已删除，请先从回收站恢复")
+                save_chapter_version(connection, current, "restore")
+                connection.execute(
+                    """
+                    UPDATE chapters
+                    SET title=?,content=?,summary=?,memory=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        version["title"],
+                        version["content"],
+                        version["summary"],
+                        version["memory"],
+                        now(),
+                        version["chapter_id"],
+                    ),
+                )
+            rebuild_project_chapter_facts(connection, project_id)
+            chapter = connection.execute(
+                "SELECT * FROM chapters WHERE id=?", (version["chapter_id"],)
+            ).fetchone()
+    return {
+        "chapter": chapter_record(chapter),
+        "restored_from_deleted": restored_from_deleted,
+    }
+
+
+def purge_deleted_chapter(version_id: str) -> None:
+    with closing(connect()) as connection:
+        with connection:
+            version = connection.execute(
+                """
+                SELECT * FROM chapter_versions
+                WHERE id=? AND event_type='delete' AND restored_at IS NULL
+                """,
+                (version_id,),
+            ).fetchone()
+            if not version:
+                raise ValueError("回收站记录不存在")
+            if connection.execute(
+                "SELECT 1 FROM chapters WHERE id=?", (version["chapter_id"],)
+            ).fetchone():
+                raise ValueError("章节仍然存在，不能永久删除历史")
+            connection.execute(
+                "DELETE FROM chapter_versions WHERE chapter_id=? AND project_id=?",
+                (version["chapter_id"], version["project_id"]),
+            )
+
+
 def fallback_chapter_summary(content: str, limit: int = CHAPTER_SUMMARY_LIMIT) -> str:
     text = re.sub(r"\s+", " ", str(content or "")).strip()
     if len(text) <= limit:
@@ -1165,6 +1382,12 @@ def confirm_paper(message_id: str) -> dict[str, Any]:
                 other_chapters = connection.execute("SELECT id,content FROM chapters WHERE project_id=? AND id<>?", (project_id, target["id"])).fetchall()
                 if any(SequenceMatcher(None, normalized, re.sub(r"\s+", "", str(other["content"]))).ratio() >= 0.82 for other in other_chapters):
                     raise ValueError("修改稿与其他已收录篇章高度重复，请重新生成")
+                if (
+                    str(target["title"]) != str(paper["title"])
+                    or str(target["content"]) != str(paper["content"])
+                    or str(target["memory"] or "{}") != memory_json
+                ):
+                    save_chapter_version(connection, target, "ai_edit")
                 connection.execute("UPDATE chapters SET title=?,content=?,summary=?,memory=?,updated_at=? WHERE id=?", (paper["title"], paper["content"], chapter_memory["summary"], memory_json, timestamp, target["id"]))
                 chapter_id = str(target["id"])
             else:
@@ -1175,7 +1398,11 @@ def confirm_paper(message_id: str) -> dict[str, Any]:
             paper.update({"status": "collected", "chapter_id": chapter_id, "memory": chapter_memory})
             connection.execute("UPDATE messages SET content=? WHERE id=?", (json.dumps({"text": record["content"], "paper": paper}, ensure_ascii=False), message_id))
             chapter = connection.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone()
-    return {"chapter": chapter_record(chapter), "paper": paper}
+    return {
+        "chapter": chapter_record(chapter),
+        "paper": paper,
+        "chapter_operation": "updated" if target else "inserted",
+    }
 
 
 def abandon_paper(message_id: str) -> dict[str, Any]:
@@ -1200,6 +1427,9 @@ def edit_chapter(chapter_id: str, title: str, content: str) -> dict[str, Any]:
             row = connection.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone()
             if not row:
                 raise ValueError("篇章不存在")
+            if str(row["title"]) == title and str(row["content"]) == content:
+                return chapter_record(row)
+            save_chapter_version(connection, row, "edit")
             fallback_memory = normalize_chapter_memory({}, content)
             connection.execute(
                 "UPDATE chapters SET title=?,content=?,summary=?,memory=?,updated_at=? WHERE id=?",
@@ -1221,10 +1451,11 @@ def get_chapter_project(chapter_id: str) -> str:
 def delete_chapter(chapter_id: str) -> None:
     with closing(connect()) as connection:
         with connection:
-            row = connection.execute("SELECT project_id FROM chapters WHERE id=?", (chapter_id,)).fetchone()
+            row = connection.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone()
             if not row:
                 raise ValueError("篇章不存在")
             project_id = str(row["project_id"])
+            save_chapter_version(connection, row, "delete")
             connection.execute("DELETE FROM chapters WHERE id=?", (chapter_id,))
             connection.execute("DELETE FROM impact_logs WHERE affected_node_id=?", (chapter_id,))
             rebuild_project_chapter_facts(connection, project_id)

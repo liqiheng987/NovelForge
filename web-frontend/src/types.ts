@@ -77,6 +77,22 @@ export type Chapter = {
   updated_at: string;
 };
 
+export type ChapterVersion = {
+  id: string;
+  chapter_id: string;
+  project_id: string;
+  session_id: string | null;
+  title: string;
+  content: string;
+  summary: string;
+  memory: Record<string, unknown>;
+  sort_order: number;
+  event_type: "edit" | "ai_edit" | "restore" | "delete";
+  chapter_created_at: string;
+  created_at: string;
+  restored_at: string | null;
+};
+
 export type Toast = { message: string; kind: "error" | "success" | "info" };
 
 export type Mode = "guided" | "collaborative" | "silent" | "traceable" | "teaching";

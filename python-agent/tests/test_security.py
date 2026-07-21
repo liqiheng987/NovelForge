@@ -145,6 +145,38 @@ class AgentAuthenticationTests(unittest.TestCase):
         affected_ids = {item["affected_node_id"] for item in response.json()["affected_nodes"]}
         self.assertIn(affected["id"], affected_ids)
 
+    def test_deleted_chapter_can_be_restored_through_api(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        project = app_module.create_project("回收站接口测试")
+        message = app_module.save_assistant_message(
+            project["session_id"],
+            "已生成篇章",
+            {"title": "可恢复章节", "content": "这段正文不能意外丢失。", "status": "draft"},
+        )
+        chapter = app_module.confirm_paper(message["id"])["chapter"]
+
+        deleted = self.client.delete(
+            "/chapter/delete",
+            headers=headers,
+            params={"chapter_id": chapter["id"]},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        trash = self.client.get(
+            "/chapters/trash",
+            headers=headers,
+            params={"project_id": project["id"]},
+        )
+        self.assertEqual(trash.status_code, 200)
+        self.assertEqual(len(trash.json()), 1)
+
+        restored = self.client.post(
+            f"/chapter/version/{trash.json()[0]['id']}/restore",
+            headers=headers,
+        )
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.json()["chapter"]["id"], chapter["id"])
+        self.assertTrue(restored.json()["restored_from_deleted"])
+
 
 if __name__ == "__main__":
     unittest.main()

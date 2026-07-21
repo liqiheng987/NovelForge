@@ -67,6 +67,8 @@ from database import (
     import_universe_rules,
     initialize_database,
     list_chapters,
+    list_chapter_versions,
+    list_deleted_chapters,
     list_facts,
     list_impacts,
     list_material_tree,
@@ -82,6 +84,8 @@ from database import (
     rename_project,
     reorder_story_nodes,
     reorder_chapters,
+    restore_chapter_version,
+    purge_deleted_chapter,
     resolve_impact,
     save_assistant_message,
     save_user_message,
@@ -1069,13 +1073,52 @@ async def chapters_reorder(request: ChapterReorderRequest) -> list[dict[str, Any
         raise as_http_error(error) from error
 
 
+@app.get("/chapter/history")
+async def chapter_history(chapter_id: str = Query(min_length=1)) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(list_chapter_versions, chapter_id)
+
+
+@app.get("/chapters/trash")
+async def chapters_trash(project_id: str = Query(min_length=1)) -> list[dict[str, Any]]:
+    try:
+        return await asyncio.to_thread(list_deleted_chapters, project_id)
+    except ValueError as error:
+        raise as_http_error(error, 404) from error
+
+
+@app.post("/chapter/version/{version_id}/restore")
+async def chapter_version_restore(version_id: str) -> dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(restore_chapter_version, version_id)
+        chapter = result["chapter"]
+        change_type = "insert" if result["restored_from_deleted"] else "modify"
+        result["affected_nodes"] = await asyncio.to_thread(
+            analyze_impact, chapter["project_id"], chapter["id"], change_type
+        )
+        return result
+    except ValueError as error:
+        raise as_http_error(error, 404) from error
+
+
+@app.delete("/chapter/trash/{version_id}")
+async def chapter_trash_purge(version_id: str) -> dict[str, str]:
+    try:
+        await asyncio.to_thread(purge_deleted_chapter, version_id)
+        return {"status": "ok"}
+    except ValueError as error:
+        raise as_http_error(error, 404) from error
+
+
 @app.post("/chapter/update")
 async def chapter_update(request: ChapterUpdateRequest) -> dict[str, Any]:
     try:
         if request.action == "confirm" and request.message_id:
             result = await asyncio.to_thread(confirm_paper, request.message_id)
             project_id = str(result["chapter"]["project_id"])
-            result["affected_nodes"] = await asyncio.to_thread(analyze_impact, project_id, result["chapter"]["id"], "insert")
+            change_type = "modify" if result["chapter_operation"] == "updated" else "insert"
+            result["affected_nodes"] = await asyncio.to_thread(
+                analyze_impact, project_id, result["chapter"]["id"], change_type
+            )
             return result
         if request.action == "abandon" and request.message_id:
             return {"paper": await asyncio.to_thread(abandon_paper, request.message_id)}

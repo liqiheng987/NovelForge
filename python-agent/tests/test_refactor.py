@@ -107,9 +107,12 @@ class RefactorDatabaseTests(unittest.TestCase):
             "已生成篇章",
             {"title": "雨夜", "content": "雨声落在窗台。" * 80, "status": "draft", "chapter_id": None, "target_chapter_id": None},
         )
-        database.confirm_paper(message["id"])
+        chapter = database.confirm_paper(message["id"])["chapter"]
+        database.edit_chapter(chapter["id"], "雨夜（修订）", "雨声停在窗台。" * 80)
+        self.assertEqual(len(database.list_chapter_versions(chapter["id"])), 1)
         database.delete_project(project["id"])
         self.assertNotIn(project["id"], [item["id"] for item in database.list_projects()])
+        self.assertEqual(database.list_chapter_versions(chapter["id"]), [])
 
     def test_deleting_session_stays_in_current_project(self) -> None:
         first = database.create_project("第一作品")
@@ -188,6 +191,87 @@ class RefactorDatabaseTests(unittest.TestCase):
         self.assertEqual(database.list_facts(project["id"])[0]["value"], "受伤")
         database.delete_chapter(first["id"])
         self.assertEqual(database.list_facts(project["id"]), [])
+
+    def test_chapter_history_and_trash_restore_content_and_memory(self) -> None:
+        project = database.create_project("章节恢复测试")
+        message = database.save_assistant_message(
+            project["session_id"],
+            "已生成篇章",
+            {
+                "title": "雨夜来客",
+                "content": "林舟带着黑钥匙进入港口。",
+                "memory": {
+                    "facts": [
+                        {"category": "plot", "key": "黑钥匙位置", "value": "港口"}
+                    ]
+                },
+                "status": "draft",
+            },
+        )
+        original = database.confirm_paper(message["id"])["chapter"]
+
+        database.edit_chapter(original["id"], "雨夜来客（修订）", "林舟独自离开港口。")
+        history = database.list_chapter_versions(original["id"])
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["title"], "雨夜来客")
+        restored = database.restore_chapter_version(history[0]["id"])
+        self.assertFalse(restored["restored_from_deleted"])
+        self.assertEqual(restored["chapter"]["content"], "林舟带着黑钥匙进入港口。")
+        self.assertEqual(database.list_facts(project["id"])[0]["value"], "港口")
+
+        database.delete_chapter(original["id"])
+        deleted = database.list_deleted_chapters(project["id"])
+        self.assertEqual(len(deleted), 1)
+        self.assertEqual(database.list_chapters(project["id"]), [])
+        recovered = database.restore_chapter_version(deleted[0]["id"])
+        self.assertTrue(recovered["restored_from_deleted"])
+        self.assertEqual(recovered["chapter"]["id"], original["id"])
+        self.assertEqual(database.list_deleted_chapters(project["id"]), [])
+
+    def test_deleted_chapter_can_be_permanently_purged(self) -> None:
+        project = database.create_project("永久删除测试")
+        message = database.save_assistant_message(
+            project["session_id"],
+            "已生成篇章",
+            {"title": "待清理章节", "content": "不会再恢复的正文。", "status": "draft"},
+        )
+        chapter = database.confirm_paper(message["id"])["chapter"]
+        database.edit_chapter(chapter["id"], "待清理章节（修订）", "修订后的正文。")
+        database.delete_chapter(chapter["id"])
+        deleted = database.list_deleted_chapters(project["id"])[0]
+
+        database.purge_deleted_chapter(deleted["id"])
+
+        self.assertEqual(database.list_deleted_chapters(project["id"]), [])
+        self.assertEqual(database.list_chapter_versions(chapter["id"]), [])
+        with self.assertRaises(ValueError):
+            database.restore_chapter_version(deleted["id"])
+
+    def test_ai_chapter_update_creates_history_version(self) -> None:
+        project = database.create_project("AI 修改历史测试")
+        first_message = database.save_assistant_message(
+            project["session_id"],
+            "初稿",
+            {"title": "旧标题", "content": "旧版正文。", "status": "draft"},
+        )
+        chapter = database.confirm_paper(first_message["id"])["chapter"]
+        revised_message = database.save_assistant_message(
+            project["session_id"],
+            "修改稿",
+            {
+                "title": "新标题",
+                "content": "新版正文。",
+                "target_chapter_id": chapter["id"],
+                "status": "draft",
+            },
+        )
+
+        result = database.confirm_paper(revised_message["id"])
+        history = database.list_chapter_versions(chapter["id"])
+
+        self.assertEqual(result["chapter_operation"], "updated")
+        self.assertEqual(history[0]["event_type"], "ai_edit")
+        self.assertEqual(history[0]["title"], "旧标题")
 
     def test_existing_chapter_fallback_reads_start_middle_and_end(self) -> None:
         project = database.create_project("旧作品兼容测试")
