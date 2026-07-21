@@ -1,6 +1,8 @@
+from contextlib import closing
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -41,6 +43,18 @@ class RefactorDatabaseTests(unittest.TestCase):
         self.assertEqual(len(database.branch_compare(project_id, source_id, branch["id"])["added"]), 1)
         database.branch_merge(project_id, branch["id"], source_id)
         self.assertIn("分支新增内容", [message["content"] for message in database.list_messages(source_id)])
+
+    def test_database_backup_is_consistent_and_visible_in_status(self) -> None:
+        database.create_project("备份验收")
+        backup = database.create_database_backup(force=True)
+        self.assertTrue(Path(backup["path"]).is_file())
+        with closing(sqlite3.connect(backup["path"])) as snapshot:
+            titles = [row[0] for row in snapshot.execute("SELECT title FROM projects")]
+        self.assertIn("备份验收", titles)
+        status = database.database_status()
+        self.assertEqual(status["status"], "ok")
+        self.assertEqual(status["backup_count"], 1)
+        self.assertEqual(status["latest_backup"]["path"], backup["path"])
 
     def test_rules_facts_and_memory_are_project_scoped(self) -> None:
         first = database.create_project("第一宇宙")["id"]

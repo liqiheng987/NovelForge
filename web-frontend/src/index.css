@@ -1657,6 +1657,37 @@ button:disabled {
   font-size: 0.61rem;
 }
 
+.settings-backup-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.settings-backup-card > div,
+.settings-backup-card > div > span {
+  display: flex;
+  gap: 7px;
+}
+
+.settings-backup-card > div > span {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-backup-card strong,
+.settings-backup-card small {
+  font-size: 0.61rem;
+}
+
+.settings-backup-card.success { color: #a6edcf; }
+.settings-backup-card.error { color: #ffc1c9; }
+
 .test-api-button {
   color: #c9c3f7;
   border-color: rgba(151, 137, 249, 0.25);

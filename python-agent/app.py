@@ -45,10 +45,12 @@ from database import (
     chat_history,
     confirm_paper,
     create_branch,
+    create_database_backup,
     create_project,
     create_session,
     create_story_node,
     create_universe_rule,
+    database_status,
     database_path,
     delete_chapter,
     delete_fact,
@@ -213,6 +215,19 @@ async def authenticate_local_client(request: Request, call_next):
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "version": "2.0", "instance_id": AGENT_INSTANCE_ID}
+
+
+@app.get("/maintenance/database")
+async def maintenance_database_status() -> dict[str, Any]:
+    return await asyncio.to_thread(database_status)
+
+
+@app.post("/maintenance/backup")
+async def maintenance_database_backup() -> dict[str, Any]:
+    try:
+        return {"backup": await asyncio.to_thread(create_database_backup, True)}
+    except ValueError as error:
+        raise as_http_error(error) from error
 
 
 @app.post("/api/test")

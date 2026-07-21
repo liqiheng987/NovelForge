@@ -112,6 +112,16 @@ class AgentAuthenticationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 413)
 
+    def test_authenticated_client_can_create_database_backup(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        response = self.client.post("/maintenance/backup", headers=headers)
+        self.assertEqual(response.status_code, 200)
+        backup = response.json()["backup"]
+        self.assertTrue(Path(backup["path"]).is_file())
+        status = self.client.get("/maintenance/database", headers=headers)
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["status"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

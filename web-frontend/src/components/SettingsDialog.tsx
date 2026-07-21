@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Check,
   CircleCheck,
+  Database,
   Eye,
   EyeOff,
   LoaderCircle,
@@ -42,6 +43,12 @@ type TestState =
   | { kind: "success"; message: string }
   | { kind: "error"; message: string };
 
+type BackupState =
+  | { kind: "idle"; message: string }
+  | { kind: "running"; message: string }
+  | { kind: "success"; message: string }
+  | { kind: "error"; message: string };
+
 type SettingsDialogProps = {
   settings: ApiProfilesState;
   onClose: () => void;
@@ -77,6 +84,7 @@ export default function SettingsDialog({
   }));
   const [showApiKey, setShowApiKey] = useState(false);
   const [testState, setTestState] = useState<TestState>({ kind: "idle" });
+  const [backupState, setBackupState] = useState<BackupState>({ kind: "idle", message: "每天首次启动自动备份，最多保留 7 份。" });
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const activeProfile = useMemo(
@@ -167,6 +175,19 @@ export default function SettingsDialog({
             ? error.message
             : "无法连接 Agent，请确认桌面端服务已启动",
       });
+    }
+  };
+
+  const createBackup = async () => {
+    if (backupState.kind === "running") return;
+    setBackupState({ kind: "running", message: "正在创建一致性备份…" });
+    try {
+      const response = await agentFetch("/maintenance/backup", { method: "POST" });
+      if (!response.ok) throw new Error(await responseError(response));
+      const result = (await response.json()) as { backup: { name: string; size: number } };
+      setBackupState({ kind: "success", message: `备份完成：${result.backup.name}（${(result.backup.size / 1024 / 1024).toFixed(1)} MB）` });
+    } catch (error) {
+      setBackupState({ kind: "error", message: error instanceof Error ? error.message : "备份失败，请稍后重试" });
     }
   };
 
@@ -291,6 +312,10 @@ export default function SettingsDialog({
               {testState.kind === "success" && <><CircleCheck size={15} /><span>{testState.message}</span></>}
               {testState.kind === "error" && <><TriangleAlert size={15} /><span>{testState.message}</span></>}
               {testState.kind === "idle" && <><Server size={15} /><span>测试会同时验证连接、Key、模型 ID 与结构化 JSON 输出。</span></>}
+            </div>
+            <div className={`settings-backup-card ${backupState.kind}`}>
+              <div><Database size={16} /><span><strong>创作数据保护</strong><small>{backupState.message}</small></span></div>
+              <button disabled={backupState.kind === "running"} type="button" onClick={() => void createBackup()}>{backupState.kind === "running" ? "备份中…" : "立即备份"}</button>
             </div>
             {saveError && <div className="settings-save-error">{saveError}</div>}
           </div>

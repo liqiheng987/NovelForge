@@ -59,6 +59,7 @@ MATERIAL_NODE_LABELS = {
 MATERIAL_CONTEXT_LIMIT = 150000
 CHAPTER_CONTEXT_LIMIT = 150000
 CHAPTER_SUMMARY_LIMIT = 1200
+BACKUP_RETENTION = 7
 CHAPTER_MEMORY_LIST_FIELDS = (
     "key_events",
     "character_changes",
@@ -107,6 +108,74 @@ def connect() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def backup_directory() -> Path:
+    return database_path().parent / "backups"
+
+
+def list_database_backups() -> list[dict[str, Any]]:
+    directory = backup_directory()
+    if not directory.is_dir():
+        return []
+    records = []
+    for path in sorted(directory.glob("novel_forge-*.db"), reverse=True):
+        try:
+            metadata = path.stat()
+        except OSError:
+            continue
+        records.append(
+            {
+                "path": str(path),
+                "name": path.name,
+                "size": metadata.st_size,
+                "created_at": datetime.fromtimestamp(metadata.st_mtime, timezone.utc).isoformat(),
+            }
+        )
+    return records
+
+
+def create_database_backup(force: bool = True) -> dict[str, Any]:
+    source_path = database_path()
+    if not source_path.is_file() or source_path.stat().st_size == 0:
+        raise ValueError("数据库尚未创建，暂时无法备份")
+    directory = backup_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc)
+    daily_prefix = f"novel_forge-{timestamp:%Y%m%d}-"
+    existing = next(iter(sorted(directory.glob(f"{daily_prefix}*.db"), reverse=True)), None)
+    if existing and not force:
+        return next(record for record in list_database_backups() if record["path"] == str(existing))
+    target = directory / f"{daily_prefix}{timestamp:%H%M%S}.db"
+    temporary = target.with_suffix(".tmp")
+    try:
+        with closing(connect()) as source, closing(sqlite3.connect(temporary)) as destination:
+            source.backup(destination)
+            check = destination.execute("PRAGMA quick_check").fetchone()
+            if not check or str(check[0]).lower() != "ok":
+                raise ValueError("备份完整性检查失败")
+        temporary.replace(target)
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+    backups = list_database_backups()
+    for stale in backups[BACKUP_RETENTION:]:
+        Path(stale["path"]).unlink(missing_ok=True)
+    return next(record for record in list_database_backups() if record["path"] == str(target))
+
+
+def database_status() -> dict[str, Any]:
+    with closing(connect()) as connection:
+        result = connection.execute("PRAGMA quick_check").fetchone()
+    backups = list_database_backups()
+    path = database_path()
+    return {
+        "status": "ok" if result and str(result[0]).lower() == "ok" else "error",
+        "database_path": str(path),
+        "database_size": path.stat().st_size if path.is_file() else 0,
+        "backup_count": len(backups),
+        "latest_backup": backups[0] if backups else None,
+    }
 
 
 def table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -354,6 +423,8 @@ def initialize_database() -> None:
             ensure_session(connection)
             normalize_chapter_titles(connection)
             compact_material_source_metadata(connection)
+    if not os.environ.get("NOVELFORGE_DB_PATH", "").strip():
+        create_database_backup(force=False)
 
 
 def set_app_state(connection: sqlite3.Connection, key: str, value: str) -> None:
