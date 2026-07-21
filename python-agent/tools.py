@@ -17,6 +17,8 @@ except ModuleNotFoundError:
 
 
 SUPPORTED_EXTENSIONS = {".docx", ".pdf", ".txt", ".epub"}
+MAX_ARCHIVE_TEXT_FILES = 5000
+MAX_ARCHIVE_TEXT_BYTES = 300 * 1024 * 1024
 TAG_STOP_WORDS = {
     "category",
     "content",
@@ -34,6 +36,14 @@ TAG_STOP_WORDS = {
 
 class FileParseError(Exception):
     pass
+
+
+def validate_archive_members(members: list[Any], format_name: str) -> None:
+    if len(members) > MAX_ARCHIVE_TEXT_FILES:
+        raise FileParseError(f"{format_name} 文本文件数量异常，可能是损坏或恶意压缩包")
+    expanded_bytes = sum(max(0, int(member.file_size)) for member in members)
+    if expanded_bytes > MAX_ARCHIVE_TEXT_BYTES:
+        raise FileParseError(f"{format_name} 解压后的文本超过 300 MB，已停止读取")
 
 
 class HtmlTextExtractor(HTMLParser):
@@ -99,7 +109,11 @@ def extract_txt(path: Path) -> str:
 def extract_docx(path: Path) -> str:
     try:
         with ZipFile(path) as archive:
-            document = archive.read("word/document.xml")
+            document_info = archive.getinfo("word/document.xml")
+            validate_archive_members([document_info], "DOCX")
+            document = archive.read(document_info)
+    except FileParseError:
+        raise
     except Exception as error:
         raise FileParseError("DOCX 文件结构损坏") from error
     root = ET.fromstring(document)
@@ -116,15 +130,21 @@ def extract_epub(path: Path) -> str:
     parts: list[str] = []
     try:
         with ZipFile(path) as archive:
-            names = sorted(
-                name
-                for name in archive.namelist()
-                if name.lower().endswith((".xhtml", ".html", ".htm"))
+            members = sorted(
+                (
+                    member
+                    for member in archive.infolist()
+                    if member.filename.lower().endswith((".xhtml", ".html", ".htm"))
+                ),
+                key=lambda member: member.filename,
             )
-            for name in names:
+            validate_archive_members(members, "EPUB")
+            for member in members:
                 parser = HtmlTextExtractor()
-                parser.feed(archive.read(name).decode("utf-8", errors="ignore"))
+                parser.feed(archive.read(member).decode("utf-8", errors="ignore"))
                 parts.extend(parser.parts)
+    except FileParseError:
+        raise
     except Exception as error:
         raise FileParseError("EPUB 文件结构损坏") from error
     return "\n".join(parts)

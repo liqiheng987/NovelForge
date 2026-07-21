@@ -112,7 +112,7 @@ class UniverseRuleCreate(BaseModel):
     key: str = Field(min_length=1, max_length=120)
     value: str = Field(min_length=1, max_length=2000)
     source: str = Field(default="manual", max_length=200)
-    immutable: bool = True
+    immutable: bool = False
 
 
 class UniverseRuleUpdate(BaseModel):

@@ -23,43 +23,51 @@ type Props = {
 export default function StoryStructure({ projectId, sessionId, projects, nodes, onRefresh, onToast }: Props) {
   const [layer, setLayer] = useState<StoryNode["layer"]>("premise");
   const [copyTargetProjectId, setCopyTargetProjectId] = useState("");
+  const [error, setError] = useState("");
   const visible = useMemo(() => nodes.filter((node) => node.layer === layer), [layer, nodes]);
+  const mutate = async (operation: () => Promise<unknown>, fallback: string) => {
+    setError("");
+    try {
+      await operation();
+      await onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : fallback);
+    }
+  };
   const add = async () => {
     if (!projectId) return;
     const title = window.prompt(`新建${layers.find(([value]) => value === layer)?.[1] ?? "节点"}标题`);
     if (!title) return;
     const content = window.prompt("节点内容（可稍后编辑）", "") ?? "";
-    await api("/story/nodes", { method: "POST", body: JSON.stringify({ project_id: projectId, session_id: sessionId, layer, title, content }) });
-    await onRefresh();
+    await mutate(() => api("/story/nodes", { method: "POST", body: JSON.stringify({ project_id: projectId, session_id: sessionId, layer, title, content }) }), "结构节点创建失败");
   };
   const edit = async (node: StoryNode) => {
     const title = window.prompt("节点标题", node.title);
     if (!title) return;
     const content = window.prompt("节点内容", node.content);
     if (content === null) return;
-    await api(`/story/nodes/${encodeURIComponent(node.id)}`, { method: "PUT", body: JSON.stringify({ title, content }) });
-    await onRefresh();
+    await mutate(() => api(`/story/nodes/${encodeURIComponent(node.id)}`, { method: "PUT", body: JSON.stringify({ title, content }) }), "结构节点更新失败");
   };
   const toggleLock = async (node: StoryNode) => {
-    await api(`/story/nodes/${encodeURIComponent(node.id)}`, { method: "PUT", body: JSON.stringify({ locked: !node.locked }) });
-    await onRefresh();
+    await mutate(() => api(`/story/nodes/${encodeURIComponent(node.id)}`, { method: "PUT", body: JSON.stringify({ locked: !node.locked }) }), "结构节点锁定状态更新失败");
   };
   const remove = async (node: StoryNode) => {
     if (!window.confirm(`删除“${node.title}”及其子节点？`)) return;
-    await api(`/story/nodes/${encodeURIComponent(node.id)}`, { method: "DELETE" });
-    await onRefresh();
+    await mutate(() => api(`/story/nodes/${encodeURIComponent(node.id)}`, { method: "DELETE" }), "结构节点删除失败");
   };
   const copyToProject = async (node: StoryNode) => {
     const targetId = copyTargetProjectId || projects.find((project) => project.id !== projectId)?.id;
     if (!targetId) return onToast("请先选择复制目标作品");
     try {
+      setError("");
       await api(`/story/nodes/${encodeURIComponent(node.id)}/copy`, { method: "POST", body: JSON.stringify({ target_project_id: targetId }) });
       onToast("结构节点已复制到目标作品");
-    } catch (error) { onToast(error instanceof Error ? error.message : "复制失败"); }
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "结构节点复制失败"); }
   };
   return (
     <section className="story-structure">
       <header><div><FolderTree size={15} /><strong>四层创作结构</strong></div><div className="story-header-actions"><select aria-label="跨作品复制目标" value={copyTargetProjectId} onChange={(event) => setCopyTargetProjectId(event.target.value)}><option value="">复制目标…</option>{projects.filter((project) => project.id !== projectId).map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></div><button disabled={!projectId} type="button" onClick={() => void add()}><Plus size={13} />新建</button></header>
+      {error && <p className="tool-error" role="alert">{error}</p>}
       <div className="story-layer-tabs">{layers.map(([value, label]) => <button className={layer === value ? "active" : ""} key={value} type="button" onClick={() => setLayer(value)}>{label}</button>)}</div>
       <div className="story-node-list">
         {!visible.length && <p>当前层级暂无节点，可手动建立骨架。</p>}

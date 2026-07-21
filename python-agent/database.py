@@ -237,7 +237,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             source TEXT NOT NULL,
-            immutable INTEGER NOT NULL DEFAULT 1,
+            immutable INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
@@ -1453,7 +1453,7 @@ def list_universe_rules(project_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute("SELECT * FROM universe_rules WHERE project_id=? ORDER BY created_at", (project_id,))]
 
 
-def create_universe_rule(project_id: str, category: str, key: str, value: str, source: str = "manual", immutable: bool = True) -> dict[str, Any]:
+def create_universe_rule(project_id: str, category: str, key: str, value: str, source: str = "manual", immutable: bool = False) -> dict[str, Any]:
     if category not in RULE_CATEGORIES:
         raise ValueError("不支持的铁律分类")
     key, value = key.strip(), value.strip()
@@ -1461,6 +1461,8 @@ def create_universe_rule(project_id: str, category: str, key: str, value: str, s
         raise ValueError("铁律名称和内容不能为空")
     with closing(connect()) as connection:
         with connection:
+            if not connection.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+                raise ValueError("作品不存在")
             if connection.execute("SELECT COUNT(*) FROM universe_rules WHERE project_id=?", (project_id,)).fetchone()[0] >= 100:
                 raise ValueError("宇宙铁律已达上限(100条)")
             rule_id = str(uuid4())
@@ -1493,9 +1495,23 @@ def delete_universe_rule(rule_id: str) -> None:
 
 
 def import_universe_rules(source_project_id: str, target_project_id: str) -> list[dict[str, Any]]:
-    rules = list_universe_rules(source_project_id)
+    if source_project_id == target_project_id:
+        raise ValueError("不能向同一作品重复导入宇宙铁律")
     with closing(connect()) as connection:
         with connection:
+            existing_projects = connection.execute(
+                "SELECT id FROM projects WHERE id IN (?,?)",
+                (source_project_id, target_project_id),
+            ).fetchall()
+            if len(existing_projects) != 2:
+                raise ValueError("源作品或目标作品不存在")
+            rules = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM universe_rules WHERE project_id=? ORDER BY created_at",
+                    (source_project_id,),
+                )
+            ]
             current = connection.execute("SELECT COUNT(*) FROM universe_rules WHERE project_id=?", (target_project_id,)).fetchone()[0]
             if current + len(rules) > 100:
                 raise ValueError("导入后宇宙铁律超过 100 条")

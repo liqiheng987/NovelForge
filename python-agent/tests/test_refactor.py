@@ -52,6 +52,25 @@ class RefactorDatabaseTests(unittest.TestCase):
         self.assertIn("林舟状态", MemoryEngine().prompt_context(first))
         self.assertNotIn("林舟状态", MemoryEngine().prompt_context(second))
 
+    def test_manual_rules_are_deletable_but_locked_rules_stay_protected(self) -> None:
+        project_id = database.create_project("规则管理")["id"]
+        manual = database.create_universe_rule(project_id, "world", "潮汐周期", "每七日变化")
+        self.assertFalse(manual["immutable"])
+        database.delete_universe_rule(manual["id"])
+        self.assertEqual(database.list_universe_rules(project_id), [])
+
+        locked = database.create_universe_rule(
+            project_id,
+            "world",
+            "核心设定",
+            "不可覆盖",
+            immutable=True,
+        )
+        with self.assertRaises(ValueError):
+            database.delete_universe_rule(locked["id"])
+        with self.assertRaises(ValueError):
+            database.import_universe_rules(project_id, project_id)
+
     def test_story_structure_settings_and_archive(self) -> None:
         first = database.create_project("长篇工程")
         second = database.create_project("衍生作品")

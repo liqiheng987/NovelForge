@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 
@@ -8,7 +9,7 @@ AGENT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT_ROOT))
 
 from agent import AgentError, infer_user_preferences, validate_model_endpoint, workflow_prompt
-from tools import check_compliance, detect_content_gaps, extract_txt_info
+from tools import FileParseError, check_compliance, detect_content_gaps, extract_txt_info, validate_archive_members
 from prompts import CROSS_GENRE_PROMPTS
 
 
@@ -41,6 +42,18 @@ class ScenarioToolTests(unittest.TestCase):
                 decoded, detected = extract_txt_info(path)
                 self.assertEqual(decoded, content)
                 self.assertIn(detected, {"gb18030", "big5", "shift_jis"})
+
+    def test_archive_text_expansion_is_bounded(self) -> None:
+        with self.assertRaises(FileParseError):
+            validate_archive_members(
+                [SimpleNamespace(file_size=300 * 1024 * 1024 + 1)],
+                "EPUB",
+            )
+        with self.assertRaises(FileParseError):
+            validate_archive_members(
+                [SimpleNamespace(file_size=1)] * 5001,
+                "EPUB",
+            )
 
     def test_gap_and_compliance_tools(self) -> None:
         gap = detect_content_gaps("第一章 开始\n第二章 发展\n第四章 结局")
