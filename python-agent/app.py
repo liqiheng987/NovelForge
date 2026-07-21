@@ -1,8 +1,10 @@
 import asyncio
 from contextlib import asynccontextmanager
+import hmac
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 from pathlib import Path
 from queue import Queue
 import sys
@@ -10,9 +12,9 @@ from time import perf_counter
 from typing import AsyncIterator, Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
 from agent import (
@@ -130,6 +132,8 @@ from tools import FileParseError, check_compliance, detect_content_gaps, export_
 
 
 LOG_PATH = database_path().parent.parent / "logs" / "agent.log"
+AGENT_TOKEN = os.environ.get("NOVELFORGE_AGENT_TOKEN", "").strip()
+AGENT_INSTANCE_ID = os.environ.get("NOVELFORGE_AGENT_INSTANCE_ID", "development").strip() or "development"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger("novelforge.agent")
 if not logger.handlers:
@@ -160,6 +164,19 @@ def as_http_error(error: ValueError, status_code: int = 400) -> HTTPException:
     return HTTPException(status_code=status_code, detail=str(error))
 
 
+async def api_config_for_project(config: ApiConfig, project_id: str | None) -> dict[str, Any]:
+    result = config.model_dump()
+    if not project_id:
+        result["privacy_mode"] = "standard"
+        return result
+    projects = await asyncio.to_thread(list_projects)
+    project = next((item for item in projects if item["id"] == project_id), None)
+    if not project:
+        raise AgentError("作品不存在")
+    result["privacy_mode"] = project.get("settings", {}).get("privacy_mode", "standard")
+    return result
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
@@ -181,9 +198,19 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def authenticate_local_client(request: Request, call_next):
+    if AGENT_TOKEN and request.method != "OPTIONS" and request.url.path != "/health":
+        expected = f"Bearer {AGENT_TOKEN}"
+        provided = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(provided, expected):
+            return JSONResponse(status_code=401, content={"detail": "Agent 访问凭据无效"})
+    return await call_next(request)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "version": "2.0"}
+    return {"status": "ok", "version": "2.0", "instance_id": AGENT_INSTANCE_ID}
 
 
 @app.post("/api/test")
@@ -215,6 +242,7 @@ async def analysis_events(request: AnalyzeRequest, paths: list[Path], hints: dic
     imports: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     total_files = len(paths)
+    api_config = await api_config_for_project(request.api_config, request.project_id)
     for file_index, path in enumerate(paths, start=1):
         started = perf_counter()
         yield sse("progress", {"file": path.name, "step": file_index, "total": total_files, "dimension": "读取文本", "status": "analyzing"})
@@ -231,7 +259,7 @@ async def analysis_events(request: AnalyzeRequest, paths: list[Path], hints: dic
                 region_progress.put_nowait(payload)
 
             analysis_task = asyncio.create_task(
-                analyze_novel(text, request.api_config.model_dump(), hints.get(str(path), ""), report_region)
+                analyze_novel(text, api_config, hints.get(str(path), ""), report_region)
             )
             while not analysis_task.done() or not region_progress.empty():
                 try:
@@ -638,7 +666,8 @@ async def inspiration(request: InspirationRequest) -> dict[str, Any]:
         premise = request.premise
         if request.project_id:
             premise += f"\n\n{await asyncio.to_thread(project_prompt_context, request.project_id)}"
-        return {"options": await generate_inspirations(premise, request.dilemma, request.api_config.model_dump())}
+        api_config = await api_config_for_project(request.api_config, request.project_id)
+        return {"options": await generate_inspirations(premise, request.dilemma, api_config)}
     except AgentError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -649,7 +678,8 @@ async def trial(request: StyleTrialRequest) -> dict[str, Any]:
         scene = request.scene
         if request.project_id:
             scene += f"\n\n{await asyncio.to_thread(project_prompt_context, request.project_id)}"
-        return {"trials": await style_trial(scene, request.styles, request.api_config.model_dump())}
+        api_config = await api_config_for_project(request.api_config, request.project_id)
+        return {"trials": await style_trial(scene, request.styles, api_config)}
     except AgentError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -703,6 +733,8 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
         inferred_mode = preferences.pop("mode", None)
         if preferences:
             project = await asyncio.to_thread(update_project_settings, project_id, preferences)
+        api_config = request.api_config.model_dump()
+        api_config["privacy_mode"] = (project or {}).get("settings", {}).get("privacy_mode", "standard")
         mode = str(inferred_mode or (request.mode.value if request.mode else (session or {}).get("mode") or "guided"))
         if request.mode or inferred_mode:
             await asyncio.to_thread(update_session_mode, request.session_id, mode)
@@ -737,7 +769,7 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
         elif request.creation_action in {"create", "continue", "modify"}:
             intent = {"should_create": True, "mode": "modify" if request.creation_action == "modify" else "create", "reason": "用户选择明确创作动作"}
         else:
-            intent = await paper_intent(request.message, request.api_config.model_dump())
+            intent = await paper_intent(request.message, api_config)
         conflicts: list[dict[str, str]] = []
         if intent["should_create"]:
             generation_history = bounded_generation_history(history)
@@ -775,7 +807,7 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                             current_command,
                             generation_history,
                             context,
-                            request.api_config.model_dump(),
+                            api_config,
                             source_paper if batch_index == 0 else None,
                             await asyncio.to_thread(chapter_summaries, project_id),
                             intent["mode"],
@@ -834,7 +866,7 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                         current_conflicts = await validate_universe_with_model(
                             await asyncio.to_thread(list_universe_rules, project_id),
                             result["paper"]["content"],
-                            request.api_config.model_dump(),
+                            api_config,
                         )
                         break
                     except AgentError as error:
@@ -930,7 +962,7 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                 effective_message,
                 history,
                 context,
-                request.api_config.model_dump(),
+                api_config,
                 mode,
                 memory_context,
             ):
@@ -1066,12 +1098,16 @@ async def export(request: ExportRequest) -> StreamingResponse:
 if __name__ == "__main__":
     reload_enabled = "--reload" in sys.argv[1:]
     quiet_mode = sys.stdout is None or sys.stderr is None
+    try:
+        agent_port = int(os.environ.get("NOVELFORGE_AGENT_PORT", "8000"))
+    except ValueError:
+        agent_port = 8000
     if not quiet_mode:
-        print("NovelForge Python agent listening on http://127.0.0.1:8000", flush=True)
+        print(f"NovelForge Python agent listening on http://127.0.0.1:{agent_port}", flush=True)
     uvicorn.run(
         "app:app" if reload_enabled else app,
         host="127.0.0.1",
-        port=8000,
+        port=agent_port,
         reload=reload_enabled,
         reload_dirs=["python-agent"] if reload_enabled else None,
         log_config=None if quiet_mode else uvicorn.config.LOGGING_CONFIG,

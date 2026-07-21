@@ -685,8 +685,8 @@ def delete_session(session_id: str) -> str:
             if not row:
                 raise ValueError("会话不存在")
             fallback = connection.execute(
-                "SELECT id,project_id FROM sessions WHERE id<>? ORDER BY last_accessed DESC LIMIT 1",
-                (session_id,),
+                "SELECT id,project_id FROM sessions WHERE id<>? AND project_id=? ORDER BY last_accessed DESC LIMIT 1",
+                (session_id, row["project_id"]),
             ).fetchone()
             connection.execute("DELETE FROM sessions WHERE id=?", (session_id,))
             if not connection.execute("SELECT 1 FROM sessions WHERE project_id=?", (row["project_id"],)).fetchone():

@@ -12,6 +12,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
+import { agentFetch } from "../api/client";
 
 export type ApiProfile = {
   id: string;
@@ -142,7 +143,7 @@ export default function SettingsDialog({
     if (!profileValid(activeProfile)) return;
     setTestState({ kind: "testing" });
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/test", {
+      const response = await agentFetch("/api/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

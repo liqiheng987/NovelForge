@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { agentFetch } from "../api/client";
 import type { Chapter } from "../types";
 
 type ExportFormat = "epub" | "txt" | "pdf";
@@ -28,7 +29,7 @@ export default function ExportDialog({ chapters, sessionId, onClose }: { chapter
     setProgress(0);
     setProgressMessage("正在连接导出服务");
     try {
-      const response = await fetch("http://127.0.0.1:8000/export", {
+      const response = await agentFetch("/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ format, file_name: fileName.trim(), session_id: sessionId }),

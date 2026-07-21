@@ -7,7 +7,7 @@ import unittest
 AGENT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT_ROOT))
 
-from agent import infer_user_preferences, workflow_prompt
+from agent import AgentError, infer_user_preferences, validate_model_endpoint, workflow_prompt
 from tools import check_compliance, detect_content_gaps, extract_txt_info
 from prompts import CROSS_GENRE_PROMPTS
 
@@ -21,6 +21,16 @@ class ScenarioToolTests(unittest.TestCase):
         self.assertEqual(infer_user_preferences("所有内容标注来源依据")["mode"], "traceable")
         self.assertEqual(infer_user_preferences("英文创作")["target_language"], "en")
         self.assertIn("跳过卷大纲", workflow_prompt({"workflow": "short"}))
+
+    def test_style_intensity_changes_workflow_prompt(self) -> None:
+        self.assertIn("克制简洁", workflow_prompt({"workflow": "standard", "style_intensity": 1}))
+        self.assertIn("表现力", workflow_prompt({"workflow": "standard", "style_intensity": 5}))
+
+    def test_local_privacy_mode_only_allows_loopback_model(self) -> None:
+        validate_model_endpoint({"base_url": "http://127.0.0.1:11434/v1", "privacy_mode": "local"})
+        validate_model_endpoint({"base_url": "http://localhost:1234/v1", "privacy_mode": "local"})
+        with self.assertRaises(AgentError):
+            validate_model_endpoint({"base_url": "https://api.openai.com/v1", "privacy_mode": "local"})
 
     def test_multiencoding_recovery(self) -> None:
         samples = {"gb18030": "中文素材与人物关系", "big5": "繁體素材與人物關係", "shift_jis": "物語の登場人物"}

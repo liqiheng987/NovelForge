@@ -78,6 +78,26 @@ class RefactorDatabaseTests(unittest.TestCase):
         database.delete_project(project["id"])
         self.assertNotIn(project["id"], [item["id"] for item in database.list_projects()])
 
+    def test_deleting_session_stays_in_current_project(self) -> None:
+        first = database.create_project("第一作品")
+        removable = database.create_session(first["id"], "待删除会话")
+        second = database.create_project("第二作品")
+        database.switch_session(second["session_id"])
+
+        fallback_id = database.delete_session(removable["id"])
+        switched = database.switch_session(fallback_id)
+
+        self.assertEqual(switched["project_id"], first["id"])
+
+    def test_deleting_last_session_recreates_same_project_session(self) -> None:
+        project = database.create_project("仅有一个会话")
+
+        fallback_id = database.delete_session(project["session_id"])
+        switched = database.switch_session(fallback_id)
+
+        self.assertEqual(switched["project_id"], project["id"])
+        self.assertEqual(len(database.list_sessions(project["id"])), 1)
+
     def test_chapter_memory_covers_full_chapter_and_updates_facts(self) -> None:
         project = database.create_project("长篇记忆测试")
         content = "开篇信号出现。" * 80 + "中段主角发现钥匙来自失踪的父亲。" + "追逐持续。" * 80 + "结尾钥匙打开了地下档案室。"

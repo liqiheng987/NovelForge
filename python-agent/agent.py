@@ -1,9 +1,11 @@
 import asyncio
 from contextvars import ContextVar
+from ipaddress import ip_address
 import json
 import re
 from time import perf_counter
 from typing import AsyncIterator, Any, Callable
+from urllib.parse import urlparse
 
 import httpx
 
@@ -46,8 +48,7 @@ ANALYSIS_USAGE: ContextVar[dict[str, int] | None] = ContextVar("analysis_usage",
 
 def compact_text(value: Any) -> str:
     if isinstance(value, dict):
-        parts = [f"{key}：{compact_text(item)}" for key, item in value.items()]
-        return "；".join(part for part in parts if not part.endswith("："))
+        return "；".join(f"{key}：{compact_text(item)}" for key, item in value.items() if item not in (None, ""))
     if isinstance(value, list):
         return "；".join(filter(None, (compact_text(item) for item in value)))
     return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -55,13 +56,26 @@ def compact_text(value: Any) -> str:
 
 def normalize_paper_title(value: Any) -> str:
     title = compact_text(value)
-    title = re.sub(r"^第\s*[0-9一二三四五六七八九十百千]+\s*章[\s·:：—-]*", "", title)
-    title = re.sub(
-        r"[\s·:：—-]*[（(]?第\s*[0-9一二三四五六七八九十百千]+\s*章[)）]?$",
-        "",
-        title,
-    )
+    numerals = "0-9一二三四五六七八九十百千万零〇两"
+    title = re.sub(rf"^第\s*[{numerals}]+\s*章[\s·:：—-]*", "", title)
+    title = re.sub(rf"[\s·:：—-]*[（(]?第\s*[{numerals}]+\s*章[）)]?$", "", title)
     return title.strip() or "未命名篇章"
+
+
+def validate_model_endpoint(api_config: dict[str, Any]) -> None:
+    base_url = str(api_config.get("base_url") or "").strip()
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise AgentError("模型服务地址必须是有效的 HTTP 或 HTTPS 地址")
+    if api_config.get("privacy_mode") != "local":
+        return
+    hostname = parsed.hostname.casefold()
+    try:
+        is_loopback = ip_address(hostname).is_loopback
+    except ValueError:
+        is_loopback = hostname == "localhost"
+    if not is_loopback:
+        raise AgentError("纯本地模式只允许连接本机模型服务，请使用 localhost 或 127.0.0.1 地址")
 
 
 def infer_user_preferences(message: str) -> dict[str, Any]:
@@ -152,6 +166,14 @@ def workflow_prompt(settings: dict[str, Any]) -> str:
         result += f" 目标总字数约 {settings['target_words']} 字。"
     if settings.get("target_language") and settings["target_language"] != "zh":
         result += f" 最终创作语言锁定为 {settings['target_language']}，文化概念需要等效转译。"
+    if settings.get("style_intensity") is not None:
+        intensity = max(0, min(5, int(settings["style_intensity"])))
+        if intensity <= 1:
+            result += " 文风保持克制简洁，减少修辞和意象堆叠。"
+        elif intensity >= 4:
+            result += " 文风强调表现力、意象和节奏变化，但不能牺牲情节清晰度。"
+        else:
+            result += " 文风在清晰叙事与文学表现之间保持平衡。"
     if settings.get("compliance_level") in {"publication", "custom"}:
         result += " 生成稿件后执行出版合规检查，保留含蓄、隐喻、作者自审三种处理选项。"
     return result
@@ -275,6 +297,7 @@ async def request_completion(
     timeout_seconds: float = 120.0,
     retries: int = 2,
 ) -> httpx.Response:
+    validate_model_endpoint(api_config)
     payload = {"model": api_config["model"], "messages": messages, "stream": stream}
     retryable_statuses = {429, 500, 502, 503, 504}
     last_error: Exception | None = None
@@ -1359,6 +1382,7 @@ async def stream_normal_reply(
     mode: str = "guided",
     project_context: str = "",
 ) -> AsyncIterator[str]:
+    validate_model_endpoint(api_config)
     payload = {
         "model": api_config["model"],
         "stream": True,
@@ -1564,19 +1588,3 @@ async def cross_genre_bridge(
 
 def project_prompt_context(project_id: str) -> str:
     return memory_engine.prompt_context(project_id)
-
-
-def compact_text(value: Any) -> str:
-    if isinstance(value, dict):
-        return "；".join(f"{key}：{compact_text(item)}" for key, item in value.items() if item not in (None, ""))
-    if isinstance(value, list):
-        return "；".join(filter(None, (compact_text(item) for item in value)))
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
-def normalize_paper_title(value: Any) -> str:
-    title = compact_text(value)
-    numerals = "0-9一二三四五六七八九十百千万零〇两"
-    title = re.sub(rf"^第\s*[{numerals}]+\s*章[\s·:：—-]*", "", title)
-    title = re.sub(rf"[\s·:：—-]*[（(]?第\s*[{numerals}]+\s*章[）)]?$", "", title)
-    return title.strip() or "未命名篇章"

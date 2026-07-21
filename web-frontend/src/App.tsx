@@ -8,7 +8,7 @@ import LeftPanel from "./components/LeftPanel";
 import RightPanel from "./components/RightPanel";
 import SettingsDialog from "./components/SettingsDialog";
 import type { ApiProfile, ApiProfilesState } from "./components/SettingsDialog";
-import { AGENT_URL, api, errorDetail, readSse } from "./api/client";
+import { agentFetch, api, errorDetail, initializeAgentConnection, readSse } from "./api/client";
 import { useChapterStore } from "./stores/chapterStore";
 import { useChatStore } from "./stores/chatStore";
 import { useMaterialSelectionStore } from "./stores/materialStore";
@@ -88,7 +88,10 @@ export default function App() {
     const connect = async () => {
       for (let attempt = 0; attempt < 60 && active; attempt += 1) {
         try {
-          await api("/health"); setAgentStatus("在线"); await loadMaterials();
+          const connection = await initializeAgentConnection();
+          const health = await api<{ instance_id?: string }>("/health");
+          if (connection.instanceId !== "development" && health.instance_id !== connection.instanceId) throw new Error("Agent 实例校验失败");
+          setAgentStatus("在线"); await loadMaterials();
           const availableProjects = await refreshProjects(); const current = availableProjects.find((project) => project.active) ?? availableProjects[0];
           if (current) { setCurrentProjectId(current.id); const availableSessions = await refreshSessions(current.id); const session = availableSessions.find((item) => item.active) ?? availableSessions[0]; if (session) await switchSession(session.id); }
           return;
@@ -108,7 +111,7 @@ export default function App() {
   const analyzeFiles = async () => {
     if (!pendingFiles.length || analyzing) return; if (!apiReady) { setShowSettings(true); return; } setAnalyzing(true);
     try {
-      const response = await fetch(`${AGENT_URL}/analyze`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: pendingFiles.map((file) => file.path), genre_hints: Object.fromEntries(pendingFiles.filter((file) => file.genre_hint).map((file) => [file.path, file.genre_hint])), api_config: apiConfig(), project_id: currentProjectId }) });
+      const response = await agentFetch("/analyze", { method: "POST", body: JSON.stringify({ paths: pendingFiles.map((file) => file.path), genre_hints: Object.fromEntries(pendingFiles.filter((file) => file.genre_hint).map((file) => [file.path, file.genre_hint])), api_config: apiConfig(), project_id: currentProjectId }) });
       if (!response.ok) throw new Error(await errorDetail(response, "素材分析失败"));
       let result: { materials: NovelMaterial[]; imports: Array<{ warnings: string[] }>; errors: Array<{ file_name: string; message: string }> } | null = null;
       await readSse(response, (event, data) => { if (event === "progress") { const dimension = String(data.dimension ?? ""); const longProgress = ["长篇区域", "章节建档", "重要章精读", "全书区域", "区域重试"].some((prefix) => dimension.startsWith(prefix)); const finished = data.status === "done" && longProgress; if (data.status === "analyzing" || finished) notify(`${finished ? "已完成" : "正在分析"} ${String(data.file ?? "素材")} · ${dimension}`, "info"); } if (event === "done") result = data as unknown as typeof result; if (event === "error") throw new Error(String(data.message ?? "素材分析失败")); });
@@ -128,7 +131,7 @@ export default function App() {
     else { state.setMessages([...state.messages, { id: userPending, session_id: activeSessionId, role: "user", content: question, selected_material_ids: snapshot, has_paper: false, paper: null, created_at: timestamp }, { id: assistantPending, session_id: activeSessionId, role: "assistant", content: "", selected_material_ids: [], has_paper: false, paper: null, created_at: timestamp }]); clearSelectedIds(); }
     setGenerating(true); setGenerationStage("正在准备创作上下文…"); const controller = new AbortController(); abortRef.current = controller; let assistantId = assistantPending; let completed = false; let content = ""; let autoCollectedCount = 0; let autoCollectTotal = 0; let autoCollectPartial = ""; const collectedTitles: string[] = [];
     try {
-      const response = await fetch(`${AGENT_URL}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: activeSessionId, project_id: currentProjectId, mode, message: question, selected_material_ids: snapshot, api_config: apiConfig(), regenerate_assistant_id: regenerateAssistantId ?? null, paper_source_message_id: paperSourceMessageId, creation_action: creationAction, chapter_target_words: chapterTargetWords ?? null }), signal: controller.signal });
+      const response = await agentFetch("/chat", { method: "POST", body: JSON.stringify({ session_id: activeSessionId, project_id: currentProjectId, mode, message: question, selected_material_ids: snapshot, api_config: apiConfig(), regenerate_assistant_id: regenerateAssistantId ?? null, paper_source_message_id: paperSourceMessageId, creation_action: creationAction, chapter_target_words: chapterTargetWords ?? null }), signal: controller.signal });
       if (!response.ok) throw new Error(await errorDetail(response, "对话生成失败"));
       await readSse(response, (event, data) => {
         if (event === "start") {
