@@ -2,7 +2,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::AppHandle;
@@ -135,7 +136,51 @@ fn safe_file_name(file_name: &str, extension: &str) -> String {
             }
         })
         .collect::<String>();
-    format!("{}.{}", sanitized.trim_matches([' ', '.']), extension)
+    let sanitized = sanitized.trim_matches([' ', '.']);
+    let safe_stem = if sanitized.is_empty() {
+        "NovelForge-小说"
+    } else {
+        sanitized
+    };
+    format!("{safe_stem}.{extension}")
+}
+
+fn write_export_file(
+    directory: &Path,
+    file_name: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let safe_name = safe_file_name(file_name, extension);
+    let stem = Path::new(&safe_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("NovelForge-小说");
+    for copy_index in 0..=9999 {
+        let candidate_name = if copy_index == 0 {
+            safe_name.clone()
+        } else {
+            format!("{stem} ({copy_index}).{extension}")
+        };
+        let target = directory.join(candidate_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes) {
+                    drop(file);
+                    let _ = fs::remove_file(&target);
+                    return Err(error.to_string());
+                }
+                return Ok(target);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("too many files with the same export name".to_string())
 }
 
 fn open_folder(path: &Path) -> Result<(), String> {
@@ -177,8 +222,7 @@ pub fn write_file(
     let bytes = BASE64
         .decode(content_base64)
         .map_err(|_| "invalid export data".to_string())?;
-    let target = directory.join(safe_file_name(&file_name, &format));
-    fs::write(&target, bytes).map_err(|error| error.to_string())?;
+    let target = write_export_file(&directory, &file_name, &format, &bytes)?;
     open_folder(&directory)?;
     Ok(target.to_string_lossy().into_owned())
 }
@@ -350,19 +394,52 @@ pub fn load_api_profiles(app: AppHandle) -> Result<Option<String>, String> {
         store.set(API_PROFILES_KEY, protect_value(value)?);
         store.save().map_err(|error| error.to_string())?;
         connection
-            .execute("DROP TABLE configs", [])
+            .execute(
+                "DELETE FROM configs WHERE key=?1",
+                params![API_PROFILES_KEY],
+            )
             .map_err(|error| error.to_string())?;
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM configs", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if remaining == 0 {
+            connection
+                .execute("DROP TABLE configs", [])
+                .map_err(|error| error.to_string())?;
+        }
     }
     Ok(decrypted)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::safe_file_name;
+    use super::{safe_file_name, write_export_file};
+    use std::fs;
 
     #[test]
     fn exported_file_name_removes_unsafe_characters() {
         assert_eq!(safe_file_name("作品<终稿>.docx", "pdf"), "作品_终稿_.pdf");
         assert_eq!(safe_file_name("普通标题", "txt"), "普通标题.txt");
+        assert_eq!(safe_file_name("...", "epub"), "NovelForge-小说.epub");
+    }
+
+    #[test]
+    fn export_preserves_existing_file_with_same_name() {
+        let directory =
+            std::env::temp_dir().join(format!("novelforge-export-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create export test directory");
+        let existing = directory.join("作品.txt");
+        fs::write(&existing, b"old").expect("write existing export");
+
+        let created =
+            write_export_file(&directory, "作品", "txt", b"new").expect("write numbered export");
+
+        assert_eq!(
+            created.file_name().and_then(|value| value.to_str()),
+            Some("作品 (1).txt")
+        );
+        assert_eq!(fs::read(existing).expect("read existing export"), b"old");
+        assert_eq!(fs::read(created).expect("read numbered export"), b"new");
+        fs::remove_dir_all(directory).expect("remove export test directory");
     }
 }

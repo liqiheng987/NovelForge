@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -51,6 +52,37 @@ class AgentAuthenticationTests(unittest.TestCase):
             headers={"Authorization": "Bearer test-agent-token"},
         )
         self.assertEqual(response.status_code, 200)
+
+    def test_cross_bridge_inherits_active_project_privacy_mode(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        project = self.client.get("/projects", headers=headers).json()[0]
+        response = self.client.patch(
+            f"/projects/{project['id']}/settings",
+            headers=headers,
+            json={"privacy_mode": "local"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        bridge = AsyncMock(return_value={"bridged_content": "fixture"})
+        with patch.object(app_module, "cross_genre_bridge", bridge):
+            response = self.client.post(
+                "/cross/bridge",
+                headers=headers,
+                json={
+                    "source_text": "测试片段",
+                    "source_type": "武侠",
+                    "target_type": "奇幻",
+                    "api_config": {
+                        "provider": "compatible",
+                        "api_key": "",
+                        "base_url": "https://example.com/v1",
+                        "model": "fixture",
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(bridge.await_args.args[3]["privacy_mode"], "local")
 
 
 if __name__ == "__main__":

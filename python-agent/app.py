@@ -687,11 +687,17 @@ async def trial(request: StyleTrialRequest) -> dict[str, Any]:
 @app.post("/cross/bridge")
 async def bridge(request: CrossBridgeRequest) -> dict[str, Any]:
     try:
+        project_id = request.project_id
+        if not project_id:
+            projects = await asyncio.to_thread(list_projects)
+            active_project = next((project for project in projects if project["active"]), None)
+            project_id = str(active_project["id"]) if active_project else None
+        api_config = await api_config_for_project(request.api_config, project_id)
         return await cross_genre_bridge(
             request.source_text,
             request.source_type,
             request.target_type,
-            request.api_config.model_dump(),
+            api_config,
             request.source_language,
             request.target_language,
         )

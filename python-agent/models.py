@@ -161,6 +161,7 @@ class CrossBridgeRequest(BaseModel):
     source_language: str = Field(default="zh", max_length=20)
     target_language: str = Field(default="zh", max_length=20)
     api_config: ApiConfig
+    project_id: str | None = None
 
 
 class StoryNodeCreateRequest(BaseModel):

@@ -3890,3 +3890,9 @@ button:disabled {
     margin-bottom: 13px;
   }
 }
+.tool-error {
+  color: #fca5a5;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 8px 0 0;
+}
