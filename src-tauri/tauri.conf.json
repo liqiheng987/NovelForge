@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NovelForge",
+  "version": "0.1.0",
+  "identifier": "com.novelforge.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm --dir web-frontend dev",
+    "beforeBuildCommand": "pnpm --dir web-frontend build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../web-frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "NovelForge",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1200,
+        "minHeight": 700,
+        "transparent": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "resources": {
+      "../python-agent/agent.py": "python-agent/agent.py",
+      "../python-agent/app.py": "python-agent/app.py",
+      "../python-agent/database.py": "python-agent/database.py",
+      "../python-agent/memory.py": "python-agent/memory.py",
+      "../python-agent/models.py": "python-agent/models.py",
+      "../python-agent/prompts.py": "python-agent/prompts.py",
+      "../python-agent/requirements.txt": "python-agent/requirements.txt",
+      "../python-agent/tools.py": "python-agent/tools.py"
+    }
+  }
+}
