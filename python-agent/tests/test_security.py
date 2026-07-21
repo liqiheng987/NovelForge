@@ -84,6 +84,34 @@ class AgentAuthenticationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(bridge.await_args.args[3]["privacy_mode"], "local")
 
+    def test_analysis_rejects_unsupported_and_oversized_files(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        api_config = {
+            "provider": "compatible",
+            "api_key": "",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "model": "fixture",
+        }
+        unsupported = Path(self.temp_directory.name) / "notes.md"
+        unsupported.write_text("fixture", encoding="utf-8")
+        response = self.client.post(
+            "/analyze",
+            headers=headers,
+            json={"paths": [str(unsupported)], "api_config": api_config},
+        )
+        self.assertEqual(response.status_code, 415)
+
+        oversized = Path(self.temp_directory.name) / "oversized.txt"
+        with oversized.open("wb") as file:
+            file.seek(app_module.MAX_IMPORT_FILE_BYTES)
+            file.write(b"x")
+        response = self.client.post(
+            "/analyze",
+            headers=headers,
+            json={"paths": [str(oversized)], "api_config": api_config},
+        )
+        self.assertEqual(response.status_code, 413)
+
 
 if __name__ == "__main__":
     unittest.main()

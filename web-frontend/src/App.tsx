@@ -16,6 +16,7 @@ import { useModeStore } from "./stores/modeStore";
 import type { BranchComparison, ChatMessage, ChatSession, Chapter, CreationAction, Fact, FileInfo, ImpactHighlight, Mode, NovelMaterial, Paper, Project, ProjectSettings as ProjectSettingsConfig, StoryNode, Toast, UniverseRule } from "./types";
 
 const SUPPORTED_EXTENSIONS = new Set([".docx", ".pdf", ".txt", ".epub"]);
+const MAX_IMPORT_FILE_BYTES = 200 * 1024 * 1024;
 const DEFAULT_API_PROFILES: ApiProfilesState = { version: 1, activeProfileId: "openai-default", profiles: [{ id: "openai-default", name: "OpenAI", provider: "openai", apiKey: "", baseUrl: "https://api.openai.com/v1", model: "" }] };
 
 function parseApiProfiles(value: string): ApiProfilesState | null {
@@ -103,10 +104,23 @@ export default function App() {
   }, [loadMaterials, notify, refreshProjects, refreshSessions, switchSession]);
 
   const stagePaths = useCallback(async (paths: string[]) => {
-    const unique = [...new Set(paths)].filter((path) => SUPPORTED_EXTENSIONS.has(path.slice(path.lastIndexOf(".")).toLowerCase())).slice(0, 5);
-    if (!unique.length || unique.length + pendingFiles.length > 5) return notify("最多支持 5 个素材文件");
-    try { const metadata = await invoke<FileInfo[]>("get_file_metadata", { paths: unique }); setPendingFiles((current) => [...current, ...metadata.map((file) => ({ ...file, genre_hint: "" }))]); } catch { notify("无法读取素材文件"); }
-  }, [notify, pendingFiles.length]);
+    const existingPaths = new Set(pendingFiles.map((file) => file.path));
+    const distinct = [...new Set(paths)].filter((path) => !existingPaths.has(path));
+    const supported = distinct.filter((path) => SUPPORTED_EXTENSIONS.has(path.slice(path.lastIndexOf(".")).toLowerCase()));
+    if (!distinct.length) return notify("所选文件已经在待分析列表中", "info");
+    if (!supported.length) return notify("仅支持 DOCX、PDF、TXT 和 EPUB 文件");
+    if (supported.length + pendingFiles.length > 5) return notify("一次最多支持 5 个素材文件");
+    try {
+      const metadata = await invoke<FileInfo[]>("get_file_metadata", { paths: supported });
+      const accepted = metadata.filter((file) => file.size <= MAX_IMPORT_FILE_BYTES);
+      const skipped: string[] = [];
+      if (supported.length < distinct.length) skipped.push("不支持的格式");
+      if (metadata.length < supported.length) skipped.push("无法读取的文件");
+      if (accepted.length < metadata.length) skipped.push("超过 200 MB 的文件");
+      if (accepted.length) setPendingFiles((current) => [...current, ...accepted.map((file) => ({ ...file, genre_hint: "" }))]);
+      if (skipped.length) notify(`已跳过：${skipped.join("、")}`, "info");
+    } catch { notify("无法读取素材文件"); }
+  }, [notify, pendingFiles]);
 
   const analyzeFiles = async () => {
     if (!pendingFiles.length || analyzing) return; if (!apiReady) { setShowSettings(true); return; } setAnalyzing(true);

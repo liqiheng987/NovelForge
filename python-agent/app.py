@@ -128,7 +128,7 @@ from models import (
     UniverseRuleCreate,
     UniverseRuleUpdate,
 )
-from tools import FileParseError, check_compliance, detect_content_gaps, export_novel, extract_text, extract_txt_info
+from tools import SUPPORTED_EXTENSIONS, FileParseError, check_compliance, detect_content_gaps, export_novel, extract_text, extract_txt_info
 
 
 LOG_PATH = database_path().parent.parent / "logs" / "agent.log"
@@ -150,6 +150,8 @@ MODE_DESCRIPTIONS = {
     "traceable": "关键结论附来源标注",
     "teaching": "执行同时讲解写作方法",
 }
+
+MAX_IMPORT_FILE_BYTES = 200 * 1024 * 1024
 
 
 def sse(event: str, payload: dict[str, Any]) -> str:
@@ -229,6 +231,14 @@ def validated_paths(request: AnalyzeRequest) -> tuple[list[Path], dict[str, str]
         path = Path(raw_path).expanduser().resolve()
         if not path.is_file():
             raise HTTPException(status_code=404, detail=f"文件不存在：{path.name}")
+        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(status_code=415, detail=f"不支持的素材格式：{path.name}")
+        try:
+            file_size = path.stat().st_size
+        except OSError as error:
+            raise HTTPException(status_code=400, detail=f"无法读取文件信息：{path.name}") from error
+        if file_size > MAX_IMPORT_FILE_BYTES:
+            raise HTTPException(status_code=413, detail=f"素材文件超过 200 MB：{path.name}")
         paths.append(path)
     hints = {
         str(Path(raw_path).expanduser().resolve()): hint.strip()

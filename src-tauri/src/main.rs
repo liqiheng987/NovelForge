@@ -16,6 +16,8 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 use tauri::{Manager, State};
 use uuid::Uuid;
 
@@ -136,22 +138,47 @@ fn configure_agent_command(
     command
 }
 
-fn start_python_agent(resource_dir: Option<&Path>) -> Option<ManagedAgent> {
-    let database = database_path().ok()?;
+fn child_survived_startup(mut child: Child) -> Option<Child> {
+    thread::sleep(Duration::from_millis(150));
+    match child.try_wait() {
+        Ok(None) => Some(child),
+        Ok(Some(_)) => None,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+fn launch_agent(
+    command: Command,
+    script: Option<&Path>,
+    working_directory: &Path,
+    database: &Path,
+) -> Option<ManagedAgent> {
     let port = available_agent_port()?;
     let connection = new_agent_connection(port);
+    let mut command = configure_agent_command(
+        command,
+        script,
+        working_directory,
+        database,
+        port,
+        &connection,
+    );
+    let child = child_survived_startup(command.spawn().ok()?)?;
+    Some(ManagedAgent { child, connection })
+}
+
+fn start_python_agent(resource_dir: Option<&Path>) -> Option<ManagedAgent> {
+    let database = database_path().ok()?;
     if let Some(binary) = python_agent_binary(resource_dir) {
         let working_directory = binary.parent()?.to_path_buf();
-        let mut command = configure_agent_command(
-            Command::new(&binary),
-            None,
-            &working_directory,
-            &database,
-            port,
-            &connection,
-        );
-        if let Ok(child) = command.spawn() {
-            return Some(ManagedAgent { child, connection });
+        if let Some(agent) =
+            launch_agent(Command::new(&binary), None, &working_directory, &database)
+        {
+            return Some(agent);
         }
     }
     let script = python_agent_script(resource_dir)?;
@@ -161,16 +188,13 @@ fn start_python_agent(resource_dir: Option<&Path>) -> Option<ManagedAgent> {
     #[cfg(not(target_os = "windows"))]
     let executables = ["python3", "python"];
     for executable in executables {
-        let mut command = configure_agent_command(
+        if let Some(agent) = launch_agent(
             Command::new(executable),
             Some(&script),
             working_directory,
             &database,
-            port,
-            &connection,
-        );
-        if let Ok(child) = command.spawn() {
-            return Some(ManagedAgent { child, connection });
+        ) {
+            return Some(agent);
         }
     }
     None
@@ -265,5 +289,21 @@ mod tests {
     #[test]
     fn available_port_is_nonzero() {
         assert!(available_agent_port().is_some_and(|port| port > 0));
+    }
+
+    #[test]
+    fn immediately_exited_agent_is_rejected() {
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd.exe")
+            .args(["/C", "exit", "1"])
+            .spawn()
+            .expect("spawn immediate exit process");
+        #[cfg(not(target_os = "windows"))]
+        let child = Command::new("sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("spawn immediate exit process");
+
+        assert!(child_survived_startup(child).is_none());
     }
 }
