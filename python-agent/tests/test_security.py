@@ -177,6 +177,35 @@ class AgentAuthenticationTests(unittest.TestCase):
         self.assertEqual(restored.json()["chapter"]["id"], chapter["id"])
         self.assertTrue(restored.json()["restored_from_deleted"])
 
+    def test_chapter_draft_round_trip_requires_current_version(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        project = app_module.create_project("草稿接口测试")
+        message = app_module.save_assistant_message(
+            project["session_id"],
+            "已生成篇章",
+            {"title": "接口章节", "content": "接口正文。", "status": "draft"},
+        )
+        chapter = app_module.confirm_paper(message["id"])["chapter"]
+        payload = {
+            "chapter_id": chapter["id"],
+            "title": "接口草稿",
+            "content": "自动保存内容。",
+            "source_updated_at": chapter["updated_at"],
+        }
+
+        saved = self.client.put("/chapter/draft", headers=headers, json=payload)
+        self.assertEqual(saved.status_code, 200)
+        loaded = self.client.get(
+            "/chapter/draft",
+            headers=headers,
+            params={"chapter_id": chapter["id"]},
+        )
+        self.assertEqual(loaded.json()["content"], "自动保存内容。")
+
+        app_module.edit_chapter(chapter["id"], "接口章节（新）", "新正文。")
+        stale = self.client.put("/chapter/draft", headers=headers, json=payload)
+        self.assertEqual(stale.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

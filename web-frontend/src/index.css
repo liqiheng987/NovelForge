@@ -2885,6 +2885,19 @@ button:disabled {
   gap: 7px;
 }
 
+.chapter-draft-status {
+  min-width: 0;
+  flex: 1;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 0.58rem;
+  line-height: 1.4;
+}
+
+.chapter-draft-status.error {
+  color: #f1a2a2;
+}
+
 .chapter-edit-dialog > footer button {
   padding: 8px 13px;
   background: var(--surface);

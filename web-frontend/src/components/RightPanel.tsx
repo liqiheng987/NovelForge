@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BookOpenCheck,
   Clipboard,
@@ -14,7 +14,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import type { Chapter, ChapterVersion, Fact, ImpactHighlight, Project, StoryNode, UniverseRule } from "../types";
+import type { Chapter, ChapterDraft, ChapterVersion, Fact, ImpactHighlight, Project, StoryNode, UniverseRule } from "../types";
 import UniverseRules from "./UniverseRules";
 import ImpactVisualization from "./ImpactVisualization";
 import StyleTrial from "./StyleTrial";
@@ -27,13 +27,16 @@ type RightPanelProps = {
   deletedChapters: ChapterVersion[];
   projectTitle: string;
   selectedChapterId: string | null;
+  onClearDraft: (chapterId: string) => Promise<boolean>;
   onDelete: (chapterId: string) => Promise<void>;
   onEdit: (chapterId: string, title: string, content: string) => Promise<void>;
   onExport: () => void;
+  onLoadDraft: (chapterId: string) => Promise<ChapterDraft | null>;
   onLoadHistory: (chapterId: string) => Promise<ChapterVersion[]>;
   onPurgeDeleted: (versionId: string) => Promise<boolean>;
   onReorder: (chapterIds: string[]) => Promise<void>;
   onRestoreVersion: (versionId: string) => Promise<boolean>;
+  onSaveDraft: (draft: Pick<ChapterDraft, "chapter_id" | "title" | "content" | "source_updated_at">) => Promise<{ ok: boolean; message?: string }>;
   onSelect: (chapterId: string) => void;
   rules: UniverseRule[];
   impacts: ImpactHighlight[];
@@ -55,13 +58,16 @@ export default function RightPanel({
   deletedChapters,
   projectTitle,
   selectedChapterId,
+  onClearDraft,
   onDelete,
   onEdit,
   onExport,
+  onLoadDraft,
   onLoadHistory,
   onPurgeDeleted,
   onReorder,
   onRestoreVersion,
+  onSaveDraft,
   onSelect,
   rules,
   impacts,
@@ -88,11 +94,69 @@ export default function RightPanel({
   const [history, setHistory] = useState<ChapterVersion[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [restoringVersionId, setRestoringVersionId] = useState<string | null>(null);
+  const [draftStatus, setDraftStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [draftError, setDraftError] = useState("");
+  const [draftLoading, setDraftLoading] = useState(false);
+  const editLoadIdRef = useRef<string | null>(null);
+  const draftSequenceRef = useRef(0);
+  const editDirty = Boolean(editing && (editTitle !== editing.title || editContent !== editing.content));
 
-  const beginEdit = (chapter: Chapter) => {
+  useEffect(() => {
+    if (!editing || !editDirty) return;
+    const sequence = ++draftSequenceRef.current;
+    setDraftStatus("saving");
+    setDraftError("");
+    const timer = window.setTimeout(async () => {
+      const result = await onSaveDraft({
+        chapter_id: editing.id,
+        title: editTitle,
+        content: editContent,
+        source_updated_at: editing.updated_at,
+      });
+      if (sequence !== draftSequenceRef.current || editLoadIdRef.current !== editing.id) return;
+      setDraftStatus(result.ok ? "saved" : "error");
+      setDraftError(result.message ?? "");
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [editContent, editDirty, editTitle, editing, onSaveDraft]);
+
+  useEffect(() => {
+    if (!editDirty) return;
+    const warnBeforeExit = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeExit);
+    return () => window.removeEventListener("beforeunload", warnBeforeExit);
+  }, [editDirty]);
+
+  const beginEdit = async (chapter: Chapter) => {
+    editLoadIdRef.current = chapter.id;
     setEditing(chapter);
     setEditTitle(chapter.title);
     setEditContent(chapter.content);
+    setDraftStatus("idle");
+    setDraftError("");
+    setDraftLoading(true);
+    const draft = await onLoadDraft(chapter.id);
+    if (editLoadIdRef.current !== chapter.id) return;
+    setDraftLoading(false);
+    if (!draft) return;
+    if (draft.title === chapter.title && draft.content === chapter.content) {
+      await onClearDraft(chapter.id);
+      return;
+    }
+    const stale = draft.source_updated_at !== chapter.updated_at;
+    const message = stale
+      ? "发现基于旧版本自动保存的草稿。章节后来已更新，是否仍恢复草稿供你检查？"
+      : `发现 ${new Date(draft.updated_at).toLocaleString("zh-CN")} 自动保存的未完成编辑，是否恢复？`;
+    if (window.confirm(message)) {
+      setEditTitle(draft.title);
+      setEditContent(draft.content);
+      setDraftStatus("saved");
+    } else {
+      await onClearDraft(chapter.id);
+    }
   };
 
   const dropBefore = async (targetId: string) => {
@@ -110,10 +174,33 @@ export default function RightPanel({
     setSaving(true);
     try {
       await onEdit(editing.id, editTitle, editContent);
+      editLoadIdRef.current = null;
+      draftSequenceRef.current += 1;
       setEditing(null);
+      setDraftStatus("idle");
+      setDraftLoading(false);
     } finally {
       setSaving(false);
     }
+  };
+
+  const closeEditor = async () => {
+    if (!editing) return;
+    if (editDirty) {
+      if (!window.confirm("当前修改还没有正式保存。关闭后会保留自动草稿，下次打开可以继续，确定关闭吗？")) return;
+      const result = await onSaveDraft({
+        chapter_id: editing.id,
+        title: editTitle,
+        content: editContent,
+        source_updated_at: editing.updated_at,
+      });
+      if (!result.ok && !window.confirm(`自动草稿保存失败：${result.message ?? "未知错误"}。仍然关闭吗？`)) return;
+    }
+    editLoadIdRef.current = null;
+    draftSequenceRef.current += 1;
+    setEditing(null);
+    setDraftStatus("idle");
+    setDraftLoading(false);
   };
 
   const openHistory = async (chapter: Chapter) => {
@@ -257,10 +344,13 @@ export default function RightPanel({
       {editing && (
         <div className="modal-backdrop">
           <section aria-modal="true" className="chapter-edit-dialog glass" role="dialog">
-            <header><div><span className="eyebrow">篇章编辑</span><h2>修改已收录篇章</h2></div><button aria-label="关闭" type="button" onClick={() => setEditing(null)}><X size={17} /></button></header>
-            <label><span>标题</span><input value={editTitle} onChange={(event) => setEditTitle(event.target.value)} /></label>
-            <label className="chapter-edit-content"><span>正文</span><textarea value={editContent} onChange={(event) => setEditContent(event.target.value)} /></label>
-            <footer><button type="button" onClick={() => setEditing(null)}>取消</button><button className="primary-button" disabled={saving || !editTitle.trim() || !editContent.trim()} type="button" onClick={() => void saveEdit()}>{saving ? "保存中…" : "保存"}</button></footer>
+            <header><div><span className="eyebrow">篇章编辑</span><h2>修改已收录篇章</h2></div><button aria-label="关闭" type="button" onClick={() => void closeEditor()}><X size={17} /></button></header>
+            <label><span>标题</span><input disabled={draftLoading} maxLength={200} value={editTitle} onChange={(event) => setEditTitle(event.target.value)} /></label>
+            <label className="chapter-edit-content"><span>正文</span><textarea disabled={draftLoading} maxLength={200000} value={editContent} onChange={(event) => setEditContent(event.target.value)} /></label>
+            <footer>
+              <span className={`chapter-draft-status ${draftStatus === "error" ? "error" : ""}`}>{draftLoading ? "正在检查自动草稿…" : draftStatus === "saving" ? "正在自动保存草稿…" : draftStatus === "saved" ? "草稿已自动保存" : draftStatus === "error" ? `草稿保存失败：${draftError}` : editDirty ? "修改将在稍后自动保存" : "当前内容已保存"}</span>
+              <button type="button" onClick={() => void closeEditor()}>取消</button><button className="primary-button" disabled={saving || draftLoading || !editTitle.trim() || !editContent.trim()} type="button" onClick={() => void saveEdit()}>{saving ? "保存中…" : "保存"}</button>
+            </footer>
           </section>
         </div>
       )}

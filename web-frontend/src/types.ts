@@ -93,6 +93,16 @@ export type ChapterVersion = {
   restored_at: string | null;
 };
 
+export type ChapterDraft = {
+  chapter_id: string;
+  project_id: string;
+  title: string;
+  content: string;
+  source_updated_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type Toast = { message: string; kind: "error" | "success" | "info" };
 
 export type Mode = "guided" | "collaborative" | "silent" | "traceable" | "teaching";

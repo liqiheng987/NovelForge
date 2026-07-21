@@ -209,6 +209,13 @@ class ChapterReorderRequest(BaseModel):
     chapter_ids: list[str]
 
 
+class ChapterDraftRequest(BaseModel):
+    chapter_id: str = Field(min_length=1, max_length=100)
+    title: str = Field(default="", max_length=200)
+    content: str = Field(default="", max_length=200000)
+    source_updated_at: str = Field(min_length=1, max_length=100)
+
+
 class ChapterUpdateRequest(BaseModel):
     action: Literal["confirm", "abandon", "edit"]
     message_id: str | None = None

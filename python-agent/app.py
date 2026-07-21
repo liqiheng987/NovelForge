@@ -44,6 +44,7 @@ from database import (
     chapter_summaries,
     chat_history,
     confirm_paper,
+    clear_chapter_draft,
     create_branch,
     create_database_backup,
     create_project,
@@ -62,6 +63,7 @@ from database import (
     delete_user_message,
     edit_chapter,
     get_paper,
+    get_chapter_draft,
     get_chapter_project,
     get_project_for_session,
     import_universe_rules,
@@ -88,6 +90,7 @@ from database import (
     purge_deleted_chapter,
     resolve_impact,
     save_assistant_message,
+    save_chapter_draft,
     save_user_message,
     store_analysis,
     switch_project,
@@ -109,6 +112,7 @@ from models import (
     BranchMergeRequest,
     BranchSwitchRequest,
     ChapterReorderRequest,
+    ChapterDraftRequest,
     ChapterUpdateRequest,
     ChatRequest,
     CrossBridgeRequest,
@@ -1076,6 +1080,31 @@ async def chapters_reorder(request: ChapterReorderRequest) -> list[dict[str, Any
 @app.get("/chapter/history")
 async def chapter_history(chapter_id: str = Query(min_length=1)) -> list[dict[str, Any]]:
     return await asyncio.to_thread(list_chapter_versions, chapter_id)
+
+
+@app.get("/chapter/draft")
+async def chapter_draft(chapter_id: str = Query(min_length=1)) -> dict[str, Any] | None:
+    return await asyncio.to_thread(get_chapter_draft, chapter_id)
+
+
+@app.put("/chapter/draft")
+async def chapter_draft_save(request: ChapterDraftRequest) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(
+            save_chapter_draft,
+            request.chapter_id,
+            request.title,
+            request.content,
+            request.source_updated_at,
+        )
+    except ValueError as error:
+        raise as_http_error(error) from error
+
+
+@app.delete("/chapter/draft")
+async def chapter_draft_clear(chapter_id: str = Query(min_length=1)) -> dict[str, str]:
+    await asyncio.to_thread(clear_chapter_draft, chapter_id)
+    return {"status": "ok"}
 
 
 @app.get("/chapters/trash")

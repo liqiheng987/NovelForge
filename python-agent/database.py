@@ -306,6 +306,18 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS chapter_drafts (
+            chapter_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source_updated_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS pinned_materials (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -426,6 +438,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_chapters_project_order ON chapters(project_id,sort_order);
         CREATE INDEX IF NOT EXISTS idx_chapter_versions_chapter ON chapter_versions(chapter_id,created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_chapter_versions_trash ON chapter_versions(project_id,event_type,restored_at,created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chapter_drafts_project ON chapter_drafts(project_id,updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_pinned_project ON pinned_materials(project_id,priority);
         CREATE INDEX IF NOT EXISTS idx_universe_project ON universe_rules(project_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_fact_project_category ON fact_tables(project_id,category);
@@ -1020,6 +1033,63 @@ def list_chapters(project_id: str | None = None) -> list[dict[str, Any]]:
     return [chapter_record(row) for row in rows]
 
 
+def get_chapter_draft(chapter_id: str) -> dict[str, Any] | None:
+    with closing(connect()) as connection:
+        row = connection.execute(
+            "SELECT * FROM chapter_drafts WHERE chapter_id=?", (chapter_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_chapter_draft(
+    chapter_id: str,
+    title: str,
+    content: str,
+    source_updated_at: str,
+) -> dict[str, Any]:
+    with closing(connect()) as connection:
+        with connection:
+            chapter = connection.execute(
+                "SELECT project_id,updated_at FROM chapters WHERE id=?", (chapter_id,)
+            ).fetchone()
+            if not chapter:
+                raise ValueError("篇章不存在")
+            if str(chapter["updated_at"]) != source_updated_at:
+                raise ValueError("章节已在其他位置更新，请重新打开后再编辑")
+            timestamp = now()
+            connection.execute(
+                """
+                INSERT INTO chapter_drafts (
+                    chapter_id,project_id,title,content,source_updated_at,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(chapter_id) DO UPDATE SET
+                    title=excluded.title,
+                    content=excluded.content,
+                    source_updated_at=excluded.source_updated_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    chapter_id,
+                    chapter["project_id"],
+                    title,
+                    content,
+                    source_updated_at,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM chapter_drafts WHERE chapter_id=?", (chapter_id,)
+            ).fetchone()
+    return dict(row)
+
+
+def clear_chapter_draft(chapter_id: str) -> None:
+    with closing(connect()) as connection:
+        with connection:
+            connection.execute("DELETE FROM chapter_drafts WHERE chapter_id=?", (chapter_id,))
+
+
 def chapter_record(row: sqlite3.Row) -> dict[str, Any]:
     record = dict(row)
     try:
@@ -1428,6 +1498,7 @@ def edit_chapter(chapter_id: str, title: str, content: str) -> dict[str, Any]:
             if not row:
                 raise ValueError("篇章不存在")
             if str(row["title"]) == title and str(row["content"]) == content:
+                connection.execute("DELETE FROM chapter_drafts WHERE chapter_id=?", (chapter_id,))
                 return chapter_record(row)
             save_chapter_version(connection, row, "edit")
             fallback_memory = normalize_chapter_memory({}, content)
@@ -1435,6 +1506,7 @@ def edit_chapter(chapter_id: str, title: str, content: str) -> dict[str, Any]:
                 "UPDATE chapters SET title=?,content=?,summary=?,memory=?,updated_at=? WHERE id=?",
                 (title, content, fallback_memory["summary"], json.dumps(fallback_memory, ensure_ascii=False), timestamp, chapter_id),
             )
+            connection.execute("DELETE FROM chapter_drafts WHERE chapter_id=?", (chapter_id,))
             rebuild_project_chapter_facts(connection, str(row["project_id"]))
             row = connection.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone()
     return chapter_record(row)

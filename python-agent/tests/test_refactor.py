@@ -273,6 +273,42 @@ class RefactorDatabaseTests(unittest.TestCase):
         self.assertEqual(history[0]["event_type"], "ai_edit")
         self.assertEqual(history[0]["title"], "旧标题")
 
+    def test_chapter_draft_autosave_rejects_stale_content_and_cleans_up(self) -> None:
+        project = database.create_project("自动草稿测试")
+        message = database.save_assistant_message(
+            project["session_id"],
+            "已生成篇章",
+            {"title": "原始标题", "content": "原始正文。", "status": "draft"},
+        )
+        chapter = database.confirm_paper(message["id"])["chapter"]
+        draft = database.save_chapter_draft(
+            chapter["id"],
+            "未完成标题",
+            "尚未正式保存的正文。",
+            chapter["updated_at"],
+        )
+        self.assertEqual(draft["content"], "尚未正式保存的正文。")
+        self.assertEqual(database.get_chapter_draft(chapter["id"])["title"], "未完成标题")
+
+        updated = database.edit_chapter(chapter["id"], "正式标题", "正式保存的正文。")
+        self.assertIsNone(database.get_chapter_draft(chapter["id"]))
+        with self.assertRaises(ValueError):
+            database.save_chapter_draft(
+                chapter["id"],
+                "过期草稿",
+                "不能覆盖正式内容。",
+                chapter["updated_at"],
+            )
+
+        database.save_chapter_draft(
+            chapter["id"],
+            "新的草稿",
+            "基于最新版本的草稿。",
+            updated["updated_at"],
+        )
+        database.delete_chapter(chapter["id"])
+        self.assertIsNone(database.get_chapter_draft(chapter["id"]))
+
     def test_existing_chapter_fallback_reads_start_middle_and_end(self) -> None:
         project = database.create_project("旧作品兼容测试")
         content = "开篇标记。" + "甲" * 1500 + "中段标记。" + "乙" * 1500 + "结尾标记。"
