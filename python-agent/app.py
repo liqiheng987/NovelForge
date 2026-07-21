@@ -62,6 +62,7 @@ from database import (
     delete_user_message,
     edit_chapter,
     get_paper,
+    get_chapter_project,
     get_project_for_session,
     import_universe_rules,
     initialize_database,
@@ -1088,10 +1089,12 @@ async def chapter_update(request: ChapterUpdateRequest) -> dict[str, Any]:
 
 
 @app.delete("/chapter/delete")
-async def chapter_delete(chapter_id: str = Query(min_length=1)) -> dict[str, str]:
+async def chapter_delete(chapter_id: str = Query(min_length=1)) -> dict[str, Any]:
     try:
+        project_id = await asyncio.to_thread(get_chapter_project, chapter_id)
+        affected = await asyncio.to_thread(analyze_impact, project_id, chapter_id, "delete")
         await asyncio.to_thread(delete_chapter, chapter_id)
-        return {"status": "ok"}
+        return {"status": "ok", "affected_nodes": affected}
     except ValueError as error:
         raise as_http_error(error, 404) from error
 

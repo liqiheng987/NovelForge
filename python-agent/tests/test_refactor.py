@@ -154,6 +154,41 @@ class RefactorDatabaseTests(unittest.TestCase):
         self.assertIn("未解线索", context)
         self.assertIn("钥匙用途", [fact["key"] for fact in database.list_facts(project["id"])])
 
+        database.upsert_fact(project["id"], "character", "主角身份", "用户确认的调查员", "user")
+        database.edit_chapter(confirmed["chapter"]["id"], "地下档案室（修订）", "主角重新整理了档案。")
+        facts = {fact["key"]: fact for fact in database.list_facts(project["id"])}
+        self.assertNotIn("钥匙用途", facts)
+        self.assertEqual(facts["主角身份"]["value"], "用户确认的调查员")
+        self.assertEqual(facts["主角身份"]["source"], "user")
+
+    def test_chapter_facts_rebuild_from_remaining_chapters(self) -> None:
+        project = database.create_project("事实回退测试")
+
+        def confirm(title: str, value: str) -> dict:
+            message = database.save_assistant_message(
+                project["session_id"],
+                "已生成篇章",
+                {
+                    "title": title,
+                    "content": f"{title}正文。",
+                    "memory": {
+                        "facts": [
+                            {"category": "character", "key": "林舟状态", "value": value}
+                        ]
+                    },
+                    "status": "draft",
+                },
+            )
+            return database.confirm_paper(message["id"])["chapter"]
+
+        first = confirm("第一章", "受伤")
+        second = confirm("第二章", "痊愈")
+        self.assertEqual(database.list_facts(project["id"])[0]["value"], "痊愈")
+        database.delete_chapter(second["id"])
+        self.assertEqual(database.list_facts(project["id"])[0]["value"], "受伤")
+        database.delete_chapter(first["id"])
+        self.assertEqual(database.list_facts(project["id"]), [])
+
     def test_existing_chapter_fallback_reads_start_middle_and_end(self) -> None:
         project = database.create_project("旧作品兼容测试")
         content = "开篇标记。" + "甲" * 1500 + "中段标记。" + "乙" * 1500 + "结尾标记。"

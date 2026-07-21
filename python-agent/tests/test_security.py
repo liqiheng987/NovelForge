@@ -122,6 +122,29 @@ class AgentAuthenticationTests(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["status"], "ok")
 
+    def test_deleting_chapter_reports_affected_references(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        project = app_module.create_project("删除影响测试")
+
+        def confirm(title: str, content: str) -> dict:
+            message = app_module.save_assistant_message(
+                project["session_id"],
+                "已生成篇章",
+                {"title": title, "content": content, "status": "draft"},
+            )
+            return app_module.confirm_paper(message["id"])["chapter"]
+
+        source = confirm("黑钥匙", "黑钥匙在雨夜出现。")
+        affected = confirm("港口回声", "守门人仍在追查黑钥匙的来历。")
+        response = self.client.delete(
+            "/chapter/delete",
+            headers=headers,
+            params={"chapter_id": source["id"]},
+        )
+        self.assertEqual(response.status_code, 200)
+        affected_ids = {item["affected_node_id"] for item in response.json()["affected_nodes"]}
+        self.assertIn(affected["id"], affected_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

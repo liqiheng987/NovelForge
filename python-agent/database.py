@@ -1097,6 +1097,53 @@ def chapter_summaries(project_id: str) -> str:
     return "\n".join([header, *entries])[:CHAPTER_CONTEXT_LIMIT]
 
 
+def rebuild_project_chapter_facts(connection: sqlite3.Connection, project_id: str) -> None:
+    connection.execute(
+        "DELETE FROM fact_tables WHERE project_id=? AND source LIKE 'chapter:%'",
+        (project_id,),
+    )
+    chapters = connection.execute(
+        "SELECT id,content,memory FROM chapters WHERE project_id=? ORDER BY sort_order,created_at",
+        (project_id,),
+    ).fetchall()
+    for chapter in chapters:
+        try:
+            stored_memory = json.loads(str(chapter["memory"] or "{}"))
+        except (json.JSONDecodeError, TypeError):
+            stored_memory = {}
+        facts = normalize_chapter_memory(stored_memory, str(chapter["content"]))["facts"]
+        for fact in facts:
+            existing = connection.execute(
+                "SELECT source FROM fact_tables WHERE project_id=? AND category=? AND key=?",
+                (project_id, fact["category"], fact["key"]),
+            ).fetchone()
+            if existing and not str(existing["source"]).startswith("chapter:"):
+                continue
+            if not existing and connection.execute(
+                "SELECT COUNT(*) FROM fact_tables WHERE project_id=?", (project_id,)
+            ).fetchone()[0] >= 200:
+                continue
+            timestamp = now()
+            connection.execute(
+                """
+                INSERT INTO fact_tables (id,project_id,category,key,value,source,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(project_id,category,key)
+                DO UPDATE SET value=excluded.value,source=excluded.source,updated_at=excluded.updated_at
+                """,
+                (
+                    str(uuid4()),
+                    project_id,
+                    fact["category"],
+                    fact["key"],
+                    fact["value"],
+                    f"chapter:{chapter['id']}",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+
 def confirm_paper(message_id: str) -> dict[str, Any]:
     with closing(connect()) as connection:
         with connection:
@@ -1124,22 +1171,7 @@ def confirm_paper(message_id: str) -> dict[str, Any]:
                 chapter_id = str(uuid4())
                 sort_order = int(connection.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM chapters WHERE project_id=?", (project_id,)).fetchone()[0])
                 connection.execute("INSERT INTO chapters (id,session_id,project_id,title,content,summary,memory,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (chapter_id, record["session_id"], project_id, paper["title"], paper["content"], chapter_memory["summary"], memory_json, sort_order, timestamp, timestamp))
-            for fact in chapter_memory["facts"]:
-                existing = connection.execute(
-                    "SELECT id FROM fact_tables WHERE project_id=? AND category=? AND key=?",
-                    (project_id, fact["category"], fact["key"]),
-                ).fetchone()
-                fact_count = connection.execute("SELECT COUNT(*) FROM fact_tables WHERE project_id=?", (project_id,)).fetchone()[0]
-                if existing or fact_count < 200:
-                    connection.execute(
-                        """
-                        INSERT INTO fact_tables (id,project_id,category,key,value,source,created_at,updated_at)
-                        VALUES (?,?,?,?,?,?,?,?)
-                        ON CONFLICT(project_id,category,key)
-                        DO UPDATE SET value=excluded.value,source=excluded.source,updated_at=excluded.updated_at
-                        """,
-                        (str(uuid4()), project_id, fact["category"], fact["key"], fact["value"], f"chapter:{chapter_id}", timestamp, timestamp),
-                    )
+            rebuild_project_chapter_facts(connection, project_id)
             paper.update({"status": "collected", "chapter_id": chapter_id, "memory": chapter_memory})
             connection.execute("UPDATE messages SET content=? WHERE id=?", (json.dumps({"text": record["content"], "paper": paper}, ensure_ascii=False), message_id))
             chapter = connection.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone()
@@ -1173,8 +1205,17 @@ def edit_chapter(chapter_id: str, title: str, content: str) -> dict[str, Any]:
                 "UPDATE chapters SET title=?,content=?,summary=?,memory=?,updated_at=? WHERE id=?",
                 (title, content, fallback_memory["summary"], json.dumps(fallback_memory, ensure_ascii=False), timestamp, chapter_id),
             )
+            rebuild_project_chapter_facts(connection, str(row["project_id"]))
             row = connection.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone()
     return chapter_record(row)
+
+
+def get_chapter_project(chapter_id: str) -> str:
+    with closing(connect()) as connection:
+        row = connection.execute("SELECT project_id FROM chapters WHERE id=?", (chapter_id,)).fetchone()
+    if not row:
+        raise ValueError("篇章不存在")
+    return str(row["project_id"])
 
 
 def delete_chapter(chapter_id: str) -> None:
@@ -1185,6 +1226,8 @@ def delete_chapter(chapter_id: str) -> None:
                 raise ValueError("篇章不存在")
             project_id = str(row["project_id"])
             connection.execute("DELETE FROM chapters WHERE id=?", (chapter_id,))
+            connection.execute("DELETE FROM impact_logs WHERE affected_node_id=?", (chapter_id,))
+            rebuild_project_chapter_facts(connection, project_id)
             rows = connection.execute("SELECT id FROM chapters WHERE project_id=? ORDER BY sort_order", (project_id,)).fetchall()
             for index, chapter in enumerate(rows, start=1):
                 connection.execute("UPDATE chapters SET sort_order=?,updated_at=? WHERE id=?", (index, now(), chapter[0]))
@@ -1664,6 +1707,10 @@ def analyze_impact(project_id: str, changed_node_id: str, change_type: str) -> l
                 candidates.append((str(row[0]), text, "foreshadow" if "伏笔" in text else "reference", "rewrite" if change_type in {"modify", "delete"} else "review"))
         logs = []
         with connection:
+            connection.execute(
+                "UPDATE impact_logs SET resolved=1 WHERE project_id=? AND changed_node_id=? AND resolved=0",
+                (project_id, changed_node_id),
+            )
             for affected_id, _, relation, action in candidates[:200]:
                 log_id = str(uuid4())
                 connection.execute("INSERT INTO impact_logs VALUES (?,?,?,?,?,?,?,?,?)", (log_id, project_id, changed_node_id, change_type, affected_id, relation if relation in IMPACT_RELATIONS else "reference", action if action in IMPACT_ACTIONS else "review", 0, now()))
