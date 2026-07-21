@@ -100,10 +100,12 @@ class UserScenarioWorkflowTests(unittest.TestCase):
         os.environ["NOVELFORGE_DB_PATH"] = str(Path(self.temp_directory.name) / "novel_forge.db")
         self.client = TestClient(app)
         self.client.__enter__()
-        web_path = PROJECT_ROOT / "小说素材" / "网文" / "三体.txt"
-        light_path = PROJECT_ROOT / "小说素材" / "轻小说" / "86-不存在的战区.txt"
-        self.assertTrue(web_path.is_file())
-        self.assertTrue(light_path.is_file())
+        fixture_directory = Path(self.temp_directory.name) / "materials"
+        fixture_directory.mkdir()
+        web_path = fixture_directory / "web_novel.txt"
+        light_path = fixture_directory / "light_novel.txt"
+        web_path.write_text("潮汐城的雨夜里，调查员沿着旧港口追查失踪的航船。", encoding="utf-8")
+        light_path.write_text("清晨的学院钟声响起，少年与同伴准备迎接新的任务。", encoding="utf-8")
         database.store_analysis(web_path, sample_analysis("网文"))
         database.store_analysis(light_path, sample_analysis("轻小说"))
         trees = database.list_material_tree()
