@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -74,6 +74,10 @@ class ProjectSettingsRequest(BaseModel):
     style_intensity: int | None = Field(default=None, ge=0, le=5)
     privacy_mode: Literal["local", "standard"] | None = None
     compliance_level: Literal["off", "publication", "custom"] | None = None
+    sensitive_terms: list[Annotated[str, Field(min_length=1, max_length=80)]] | None = Field(
+        default=None,
+        max_length=100,
+    )
     metadata: dict[str, str | int | float | bool] | None = None
 
 
@@ -238,6 +242,7 @@ class ExportRequest(BaseModel):
     file_name: str = Field(min_length=1, max_length=120)
     session_id: str = Field(min_length=1, max_length=100)
     project_id: str | None = None
+    acknowledge_warnings: bool = False
 
 
 class Paper(BaseModel):

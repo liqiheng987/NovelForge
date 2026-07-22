@@ -150,7 +150,31 @@ export type ProjectSettings = {
   style_intensity?: number;
   privacy_mode?: "local" | "standard";
   compliance_level?: "off" | "publication" | "custom";
+  sensitive_terms?: string[];
   metadata?: Record<string, string | number | boolean>;
+};
+
+export type PublicationReadiness = {
+  status: "ready" | "attention" | "blocked";
+  can_export: boolean;
+  summary: {
+    chapter_count: number;
+    total_words: number;
+    target_words: number;
+    progress_percent: number;
+  };
+  checks: Array<{
+    id: string;
+    level: "ok" | "warning" | "error";
+    title: string;
+    detail: string;
+  }>;
+  findings: Array<{
+    chapter_id: string;
+    chapter_title: string;
+    term: string;
+    count: number;
+  }>;
 };
 
 export type StoryNode = {

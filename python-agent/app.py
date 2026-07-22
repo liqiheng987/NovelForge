@@ -83,6 +83,7 @@ from database import (
     list_messages,
     list_pinned_materials,
     list_projects,
+    project_delivery_snapshot,
     list_sessions,
     list_story_nodes,
     list_universe_rules,
@@ -151,7 +152,7 @@ from models import (
     UniverseRuleCreate,
     UniverseRuleUpdate,
 )
-from tools import SUPPORTED_EXTENSIONS, FileParseError, check_compliance, detect_content_gaps, export_novel, extract_text, extract_txt_info
+from tools import SUPPORTED_EXTENSIONS, FileParseError, check_compliance, count_text_units, detect_content_gaps, export_novel, extract_text, extract_txt_info
 
 
 LOG_PATH = database_path().parent.parent / "logs" / "agent.log"
@@ -214,6 +215,8 @@ app.add_middleware(
     allow_origins=[
         "http://127.0.0.1:1420",
         "http://localhost:1420",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
         "http://tauri.localhost",
         "https://tauri.localhost",
         "tauri://localhost",
@@ -434,8 +437,117 @@ async def update_project(project_id: str, request: ProjectCreateRequest) -> dict
 @app.patch("/projects/{project_id}/settings")
 async def project_settings(project_id: str, request: ProjectSettingsRequest) -> dict[str, Any]:
     settings = {key: value for key, value in request.model_dump().items() if value is not None}
+    if "sensitive_terms" in settings:
+        settings["sensitive_terms"] = list(
+            dict.fromkeys(term.strip() for term in settings["sensitive_terms"] if term.strip())
+        )
     try:
         return await asyncio.to_thread(update_project_settings, project_id, settings)
+    except ValueError as error:
+        raise as_http_error(error, 404) from error
+
+
+def publication_readiness_report(project_id: str) -> dict[str, Any]:
+    snapshot = project_delivery_snapshot(project_id)
+    project = snapshot["project"]
+    chapters = snapshot["chapters"]
+    settings = project.get("settings") or {}
+    checks: list[dict[str, str]] = []
+
+    def add_check(check_id: str, level: str, title: str, detail: str) -> None:
+        checks.append({"id": check_id, "level": level, "title": title, "detail": detail})
+
+    blank_chapters = [chapter for chapter in chapters if not str(chapter.get("content") or "").strip()]
+    if not chapters:
+        add_check("manuscript", "error", "正式篇章", "还没有已确认收录的篇章，暂时无法导出。")
+    elif blank_chapters:
+        add_check("manuscript", "error", "正式篇章", f"有 {len(blank_chapters)} 章正文为空，需要先补全。")
+    else:
+        add_check("manuscript", "ok", "正式篇章", f"{len(chapters)} 章正文均可用于导出。")
+
+    total_units = sum(count_text_units(str(chapter.get("content") or "")) for chapter in chapters)
+    target_words = int(settings.get("target_words") or 80_000)
+    progress_percent = min(100, round(total_units / target_words * 100)) if target_words else 100
+    if total_units < target_words:
+        add_check("target", "warning", "目标字数", f"当前约 {total_units:,} 字，完成目标 {target_words:,} 字的 {progress_percent}%。")
+    else:
+        add_check("target", "ok", "目标字数", f"当前约 {total_units:,} 字，已经达到 {target_words:,} 字目标。")
+
+    drafts = snapshot["drafts"]
+    if drafts:
+        titles = "、".join(str(item["title"]) for item in drafts[:3])
+        suffix = "等" if len(drafts) > 3 else ""
+        add_check("drafts", "warning", "未保存修改", f"{len(drafts)} 章有自动草稿：{titles}{suffix}。导出只包含已正式保存的版本。")
+    else:
+        add_check("drafts", "ok", "未保存修改", "没有待处理的自动草稿。")
+
+    unresolved_impacts = snapshot["unresolved_impacts"]
+    if unresolved_impacts:
+        add_check("impacts", "warning", "联动检查", f"还有 {unresolved_impacts} 项内容联动影响尚未确认。")
+    else:
+        add_check("impacts", "ok", "联动检查", "没有待处理的内容联动影响。")
+
+    planned_chapters = snapshot["planned_chapters"]
+    if planned_chapters > len(chapters):
+        add_check("plan", "warning", "规划完成度", f"结构中规划了 {planned_chapters} 个章节节点，目前收录 {len(chapters)} 章。")
+    elif planned_chapters:
+        add_check("plan", "ok", "规划完成度", f"已收录篇章覆盖 {planned_chapters} 个章节规划节点。")
+    else:
+        add_check("plan", "ok", "规划完成度", "当前作品没有未完成的章节规划节点。")
+
+    normalized_titles = [str(chapter.get("title") or "").strip().casefold() for chapter in chapters]
+    duplicate_count = len(normalized_titles) - len(set(normalized_titles))
+    if duplicate_count:
+        add_check("titles", "warning", "章节标题", f"发现 {duplicate_count} 个重复标题，建议导出前区分。")
+    else:
+        add_check("titles", "ok", "章节标题", "章节标题没有重复。")
+
+    custom_terms = settings.get("sensitive_terms")
+    if not isinstance(custom_terms, list):
+        metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+        custom_terms = metadata.get("sensitive_terms", [])
+    custom_terms = [str(term).strip() for term in custom_terms if str(term).strip()] if isinstance(custom_terms, list) else []
+    findings: list[dict[str, Any]] = []
+    finding_count = 0
+    for chapter in chapters:
+        compliance = check_compliance(str(chapter.get("content") or ""), custom_terms)
+        for finding in compliance["findings"]:
+            finding_count += int(finding["count"])
+            if len(findings) < 200:
+                findings.append(
+                    {
+                        "chapter_id": chapter["id"],
+                        "chapter_title": chapter["title"],
+                        "term": finding["term"],
+                        "count": finding["count"],
+                    }
+                )
+    if findings:
+        add_check("compliance", "warning", "出版敏感项", f"{len({item['chapter_id'] for item in findings})} 章命中 {finding_count} 处，请确认是否需要改写。")
+    else:
+        add_check("compliance", "ok", "出版敏感项", "没有命中内置或自定义敏感项。")
+
+    can_export = bool(chapters) and not blank_chapters
+    has_warnings = any(check["level"] == "warning" for check in checks)
+    status = "blocked" if not can_export else "attention" if has_warnings else "ready"
+    return {
+        "status": status,
+        "can_export": can_export,
+        "summary": {
+            "chapter_count": len(chapters),
+            "total_words": total_units,
+            "target_words": target_words,
+            "progress_percent": progress_percent,
+        },
+        "checks": checks,
+        "findings": findings,
+    }
+
+
+@app.get("/projects/{project_id}/publication-readiness")
+async def publication_readiness(project_id: str) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(publication_readiness_report, project_id)
     except ValueError as error:
         raise as_http_error(error, 404) from error
 
@@ -1093,7 +1205,10 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                     raise AgentError("生成内容违反宇宙铁律：" + "；".join(item["rule_key"] for item in current_conflicts))
                 conflicts.extend(current_conflicts)
                 if (project or {}).get("settings", {}).get("compliance_level") in {"publication", "custom"}:
-                    custom_terms = (project or {}).get("settings", {}).get("metadata", {}).get("sensitive_terms", [])
+                    project_settings = (project or {}).get("settings", {})
+                    custom_terms = project_settings.get("sensitive_terms")
+                    if not isinstance(custom_terms, list):
+                        custom_terms = project_settings.get("metadata", {}).get("sensitive_terms", [])
                     compliance = await asyncio.to_thread(check_compliance, result["paper"]["content"], custom_terms if isinstance(custom_terms, list) else [])
                     yield sse("compliance", {**compliance, "batch_index": current_number, "batch_total": batch_count})
                 last_saved_message = await asyncio.to_thread(
@@ -1412,6 +1527,18 @@ async def export_events(request: ExportRequest) -> AsyncIterator[str]:
 
 @app.post("/export")
 async def export(request: ExportRequest) -> StreamingResponse:
+    if request.project_id:
+        try:
+            session_project_id = await asyncio.to_thread(get_project_for_session, request.session_id)
+            if session_project_id != request.project_id:
+                raise ValueError("会话不属于指定作品")
+            readiness = await asyncio.to_thread(publication_readiness_report, request.project_id)
+        except ValueError as error:
+            raise as_http_error(error, 404) from error
+        if not readiness["can_export"]:
+            raise HTTPException(status_code=409, detail="请先补全正式篇章，再导出作品")
+        if readiness["status"] == "attention" and not request.acknowledge_warnings:
+            raise HTTPException(status_code=409, detail="请先确认出版前检查提醒")
     return StreamingResponse(export_events(request), media_type="text/event-stream", headers=stream_headers())
 
 

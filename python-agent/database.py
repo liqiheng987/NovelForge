@@ -1403,6 +1403,42 @@ def list_chapters(project_id: str | None = None) -> list[dict[str, Any]]:
     return [chapter_record(row) for row in rows]
 
 
+def project_delivery_snapshot(project_id: str) -> dict[str, Any]:
+    with closing(connect()) as connection:
+        project = connection.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not project:
+            raise ValueError("作品不存在")
+        chapters = connection.execute(
+            "SELECT * FROM chapters WHERE project_id=? ORDER BY sort_order ASC",
+            (project_id,),
+        ).fetchall()
+        drafts = connection.execute(
+            """
+            SELECT chapter_drafts.chapter_id,chapters.title,chapter_drafts.updated_at
+            FROM chapter_drafts
+            JOIN chapters ON chapters.id=chapter_drafts.chapter_id
+            WHERE chapter_drafts.project_id=?
+            ORDER BY chapter_drafts.updated_at DESC
+            """,
+            (project_id,),
+        ).fetchall()
+        unresolved_impacts = connection.execute(
+            "SELECT COUNT(*) FROM impact_logs WHERE project_id=? AND resolved=0 AND action_required!='none'",
+            (project_id,),
+        ).fetchone()[0]
+        planned_chapters = connection.execute(
+            "SELECT COUNT(*) FROM story_nodes WHERE project_id=? AND layer='chapter_beat'",
+            (project_id,),
+        ).fetchone()[0]
+    return {
+        "project": project_record(project),
+        "chapters": [chapter_record(row) for row in chapters],
+        "drafts": [dict(row) for row in drafts],
+        "unresolved_impacts": int(unresolved_impacts),
+        "planned_chapters": int(planned_chapters),
+    }
+
+
 def get_chapter_draft(chapter_id: str) -> dict[str, Any] | None:
     with closing(connect()) as connection:
         row = connection.execute(

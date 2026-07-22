@@ -156,7 +156,7 @@ class UserScenarioWorkflowTests(unittest.TestCase):
                     self.assertEqual(confirmed.status_code, 200, confirmed.text)
                     chapters = self.client.get("/chapters", params={"project_id": project_id}).json()
                     self.assertEqual(len(chapters), 1)
-                    exported = self.client.post("/export", json={"format": "txt", "file_name": f"实例{case_id}", "session_id": session_id, "project_id": project_id})
+                    exported = self.client.post("/export", json={"format": "txt", "file_name": f"实例{case_id}", "session_id": session_id, "project_id": project_id, "acknowledge_warnings": True})
                     self.assertIn("content_base64", exported.text)
                     self.exercise_special_path(case_id, project_id, session_id, premise.json()["id"], api_config)
                     executed.append(case_id)

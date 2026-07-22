@@ -14,9 +14,11 @@ type ProjectSettingsProps = {
 
 export default function ProjectSettings({ project, disabled, canDelete, onDelete, onRename, onUpdate, onStatus }: ProjectSettingsProps) {
   const [title, setTitle] = useState(project?.title ?? "");
+  const [sensitiveTerms, setSensitiveTerms] = useState((project?.settings.sensitive_terms ?? []).join("，"));
   const [busyAction, setBusyAction] = useState<"rename" | "delete" | null>(null);
 
   useEffect(() => setTitle(project?.title ?? ""), [project?.id, project?.title]);
+  useEffect(() => setSensitiveTerms((project?.settings.sensitive_terms ?? []).join("，")), [project?.id, project?.settings.sensitive_terms]);
   if (!project) return null;
   const settings = project.settings ?? {};
   const titleChanged = title.trim() !== project.title;
@@ -36,6 +38,12 @@ export default function ProjectSettings({ project, disabled, canDelete, onDelete
     try { await onDelete(); } finally { setBusyAction(null); }
   };
 
+  const saveSensitiveTerms = async () => {
+    const terms = [...new Set(sensitiveTerms.split(/[，,\n]/).map((term) => term.trim()).filter(Boolean))].slice(0, 100);
+    if (terms.join("\n") === (settings.sensitive_terms ?? []).join("\n")) return;
+    await onUpdate({ sensitive_terms: terms });
+  };
+
   return (
     <section className="project-settings-bar">
       <div><SlidersHorizontal size={14} /><strong>创作配置</strong></div>
@@ -48,6 +56,7 @@ export default function ProjectSettings({ project, disabled, canDelete, onDelete
       <label>风格强度<input disabled={disabled} min={0} max={5} type="range" value={settings.style_intensity ?? 3} onChange={(event) => void onUpdate({ style_intensity: Number(event.target.value) })} /></label>
       <label>隐私<select disabled={disabled} value={settings.privacy_mode ?? "standard"} onChange={(event) => void onUpdate({ privacy_mode: event.target.value as Settings["privacy_mode"] })}><option value="standard">标准模式</option><option value="local">纯本地模型</option></select></label>
       <label>合规<select disabled={disabled} value={settings.compliance_level ?? "off"} onChange={(event) => void onUpdate({ compliance_level: event.target.value as Settings["compliance_level"] })}><option value="off">关闭</option><option value="publication">出版检查</option><option value="custom">自定义</option></select></label>
+      {settings.compliance_level === "custom" && <label className="project-sensitive-terms">敏感词<input disabled={disabled} maxLength={8100} placeholder="用逗号分隔" value={sensitiveTerms} onBlur={() => void saveSensitiveTerms()} onChange={(event) => setSensitiveTerms(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>}
       <span className="project-settings-divider" />
       <button disabled={disabled || Boolean(busyAction)} type="button" onClick={() => void onStatus(project.status === "archived" ? "active" : "archived")}>{project.status === "archived" ? <RotateCcw size={13} /> : <Archive size={13} />}{project.status === "archived" ? "恢复" : "归档"}</button>
       <button className="project-delete-button" disabled={disabled || Boolean(busyAction) || !canDelete} title={canDelete ? "永久删除当前作品" : "至少保留一个作品"} type="button" onClick={() => void remove()}><Trash2 size={13} />{busyAction === "delete" ? "删除中" : "删除作品"}</button>

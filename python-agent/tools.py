@@ -232,6 +232,12 @@ def check_compliance(text: str, custom_terms: list[str] | None = None) -> dict[s
     return {"safe": not findings, "findings": findings, "profile": "publication"}
 
 
+def count_text_units(text: str) -> int:
+    chinese_characters = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
+    latin_words = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", text))
+    return chinese_characters + latin_words
+
+
 def analysis_excerpt(text: str, limit: int = 48000) -> str:
     if len(text) <= limit:
         return text

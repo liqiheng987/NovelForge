@@ -15,7 +15,7 @@ export type AgentServiceStatus = {
 };
 
 const developmentConnection: AgentConnection = {
-  baseUrl: "http://127.0.0.1:8000",
+  baseUrl: import.meta.env.VITE_AGENT_URL || "http://127.0.0.1:8000",
   token: "",
   instanceId: "development",
 };
