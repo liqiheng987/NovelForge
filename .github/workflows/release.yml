@@ -1,19 +1,44 @@
 name: Windows Release
 
 on:
-  workflow_dispatch:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Version tag, for example v0.1.0"
+        required: true
+        default: "v0.1.0"
+      publish_release:
+        description: "Create or update the GitHub Release after acceptance passes"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build-windows:
+  build-test-publish:
     runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            python-agent/requirements.txt
+            python-agent/requirements-build.txt
 
       - uses: pnpm/action-setup@v6
         with:
@@ -26,17 +51,155 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install frontend dependencies
+      - name: Verify release version
+        shell: pwsh
+        run: ./scripts/check-release-version.ps1 -Tag $env:RELEASE_TAG
+
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Agent and installers
-        run: pnpm build
+      - name: Configure optional code signing
+        id: signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $hasCertificate = ![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)
+          $hasPassword = ![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+          if ($hasCertificate -xor $hasPassword) {
+            throw "WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD must be configured together"
+          }
+          if (!$hasCertificate) {
+            "SIGNING_ENABLED=false" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "## Code signing`n`nUnsigned build: signing secrets are not configured." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "novelforge-signing.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password |
+            Where-Object { $_.HasPrivateKey } |
+            Select-Object -First 1
+          if (!$certificate) { throw "The code-signing certificate could not be imported" }
+          "SIGNING_ENABLED=true" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "## Code signing`n`nAuthenticode signing is enabled for this release." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
-      - name: Upload Windows installers
+      - name: Prepare release configuration
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $windows = [ordered]@{
+            digestAlgorithm = "sha256"
+            timestampUrl = "http://timestamp.digicert.com"
+          }
+          if ($env:SIGNING_ENABLED -eq "true") {
+            $windows.certificateThumbprint = $env:CERTIFICATE_THUMBPRINT
+          }
+          $config = [ordered]@{ version = $version; bundle = [ordered]@{ windows = $windows } }
+          $configPath = Join-Path $env:RUNNER_TEMP "tauri-release.json"
+          $config | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $configPath
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_CONFIG=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build packaged Agent
+        run: pnpm build:agent
+
+      - name: Resolve upgrade baseline
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $current = [version]$env:RELEASE_VERSION
+          $releases = gh release list --limit 100 --json tagName,isDraft,isPrerelease | ConvertFrom-Json
+          $previous = $releases |
+            Where-Object { !$_.isDraft -and $_.tagName -match '^v\d+\.\d+\.\d+$' -and [version]$_.tagName.Substring(1) -lt $current } |
+            Sort-Object { [version]$_.tagName.Substring(1) } -Descending |
+            Select-Object -First 1
+          if ($previous) {
+            $downloadDirectory = Join-Path $env:RUNNER_TEMP "upgrade-baseline"
+            New-Item -ItemType Directory -Path $downloadDirectory | Out-Null
+            gh release download $previous.tagName --pattern "*.msi" --dir $downloadDirectory
+            $baselineMsi = Get-ChildItem $downloadDirectory -Filter *x64*.msi | Select-Object -First 1
+            if (!$baselineMsi) { throw "Previous release $($previous.tagName) has no MSI asset" }
+            "BASELINE_VERSION=$($previous.tagName.Substring(1))" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "BASELINE_MSI=$($baselineMsi.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            exit 0
+          }
+
+          $baselineVersion = "0.0.9"
+          $releaseConfig = Get-Content -Raw $env:RELEASE_CONFIG | ConvertFrom-Json
+          $releaseConfig.version = $baselineVersion
+          $baselineConfig = Join-Path $env:RUNNER_TEMP "tauri-baseline.json"
+          $releaseConfig | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $baselineConfig
+          pnpm tauri build --bundles msi --config $baselineConfig --ci --ignore-version-mismatches
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $baselineMsi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*_${baselineVersion}_*x64*.msi" | Select-Object -First 1
+          if (!$baselineMsi) { throw "Synthetic baseline MSI was not generated" }
+          $savedBaseline = Join-Path $env:RUNNER_TEMP "NovelForge_${baselineVersion}_x64_en-US.msi"
+          Copy-Item -LiteralPath $baselineMsi.FullName -Destination $savedBaseline
+          "BASELINE_VERSION=$baselineVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BASELINE_MSI=$savedBaseline" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build release installers
+        run: pnpm tauri build --config "$env:RELEASE_CONFIG" --ci
+
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          $assetDirectory = Join-Path $env:GITHUB_WORKSPACE "release-assets"
+          New-Item -ItemType Directory -Path $assetDirectory | Out-Null
+          Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*_${env:RELEASE_VERSION}_*x64*.msi" | Copy-Item -Destination $assetDirectory
+          Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*_${env:RELEASE_VERSION}_*x64*-setup.exe" | Copy-Item -Destination $assetDirectory
+          $currentMsi = Get-ChildItem $assetDirectory -Filter "*_${env:RELEASE_VERSION}_*x64*.msi" | Select-Object -First 1
+          $currentNsis = Get-ChildItem $assetDirectory -Filter "*_${env:RELEASE_VERSION}_*x64*-setup.exe" | Select-Object -First 1
+          if (!$currentMsi -or !$currentNsis) { throw "Release installers were not generated" }
+          "CURRENT_MSI=$($currentMsi.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CURRENT_NSIS=$($currentNsis.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ASSET_DIRECTORY=$assetDirectory" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Test install, startup, upgrade, and uninstall
+        shell: pwsh
+        run: |
+          $arguments = @{
+            CurrentMsi = $env:CURRENT_MSI
+            CurrentNsis = $env:CURRENT_NSIS
+            BaselineMsi = $env:BASELINE_MSI
+            CurrentVersion = $env:RELEASE_VERSION
+            BaselineVersion = $env:BASELINE_VERSION
+            RequireSignature = $env:SIGNING_ENABLED -eq "true"
+          }
+          ./scripts/test-windows-installers.ps1 @arguments
+          "## Windows acceptance`n`nPassed upgrade, fresh MSI, fresh NSIS, startup, data preservation, and uninstall checks." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem $env:ASSET_DIRECTORY -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -Encoding ascii (Join-Path $env:ASSET_DIRECTORY "SHA256SUMS.txt")
+
+      - name: Upload validated installers
         uses: actions/upload-artifact@v7
         with:
-          name: NovelForge-Windows-${{ github.ref_name }}
-          path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*-setup.exe
+          name: NovelForge-Windows-${{ env.RELEASE_TAG }}
+          path: release-assets/*
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Create or update GitHub Release
+        if: github.event_name == 'push' || inputs.publish_release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem $env:ASSET_DIRECTORY -File | ForEach-Object { $_.FullName }
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $assets --clobber
+          } else {
+            gh release create $env:RELEASE_TAG $assets --verify-tag --title "NovelForge $env:RELEASE_VERSION" --generate-notes
+          }
