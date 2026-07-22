@@ -1708,6 +1708,78 @@ button:disabled {
   font-size: 0.61rem;
 }
 
+.settings-service-panel {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.settings-service-status {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-service-status > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-service-status strong,
+.settings-service-status small {
+  overflow: hidden;
+  font-size: 0.61rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-service-indicator {
+  width: 7px;
+  height: 7px;
+  background: #db5d6f;
+  border-radius: 50%;
+  box-shadow: 0 0 7px rgba(219, 93, 111, 0.38);
+}
+
+.settings-service-panel.online .settings-service-indicator {
+  background: var(--green);
+  box-shadow: 0 0 7px rgba(94, 214, 160, 0.42);
+}
+
+.settings-service-panel.recovering .settings-service-indicator {
+  background: #e8bd68;
+  box-shadow: 0 0 7px rgba(232, 189, 104, 0.4);
+}
+
+.settings-service-actions {
+  display: flex;
+  flex: none;
+  gap: 5px;
+}
+
+.settings-service-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 7px;
+  color: var(--muted-strong);
+  font-size: 0.58rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
 .settings-backup-panel {
   flex: none;
   color: var(--muted);

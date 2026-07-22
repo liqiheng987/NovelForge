@@ -6,6 +6,14 @@ export type AgentConnection = {
   instanceId: string;
 };
 
+export type AgentServiceStatus = {
+  status: "online" | "recovering" | "offline";
+  detail: string;
+  restartCount: number;
+  startedAt: number | null;
+  instanceId: string | null;
+};
+
 const developmentConnection: AgentConnection = {
   baseUrl: "http://127.0.0.1:8000",
   token: "",
@@ -16,8 +24,22 @@ let connectionPromise: Promise<AgentConnection> | null = null;
 
 export function initializeAgentConnection(): Promise<AgentConnection> {
   if (!("__TAURI_INTERNALS__" in window)) return Promise.resolve(developmentConnection);
-  if (!connectionPromise) connectionPromise = invoke<AgentConnection>("get_agent_connection");
+  if (!connectionPromise) {
+    connectionPromise = invoke<AgentConnection>("get_agent_connection").catch((error) => {
+      connectionPromise = null;
+      throw error;
+    });
+  }
   return connectionPromise;
+}
+
+export function resetAgentConnection() {
+  connectionPromise = null;
+}
+
+export function refreshAgentConnection(): Promise<AgentConnection> {
+  resetAgentConnection();
+  return initializeAgentConnection();
 }
 
 export const errorDetail = async (response: Response, fallback: string) => {
@@ -36,14 +58,23 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export async function agentFetch(path: string, init?: RequestInit): Promise<Response> {
+  const request = async (connection: AgentConnection) => {
+    const headers = new Headers(init?.headers);
+    if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    if (connection.token) headers.set("Authorization", `Bearer ${connection.token}`);
+    return fetch(`${connection.baseUrl}${path}`, { ...init, headers });
+  };
   const connection = await initializeAgentConnection();
-  const headers = new Headers(init?.headers);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  if (connection.token) headers.set("Authorization", `Bearer ${connection.token}`);
-  return fetch(`${connection.baseUrl}${path}`, {
-    ...init,
-    headers,
-  });
+  try {
+    return await request(connection);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (!("__TAURI_INTERNALS__" in window)) throw error;
+    const refreshed = await refreshAgentConnection();
+    const method = (init?.method || "GET").toUpperCase();
+    if (method === "GET" || method === "HEAD") return request(refreshed);
+    throw new Error("Agent 连接已恢复，请重新执行刚才的操作");
+  }
 }
 
 export type SseHandler = (event: string, data: Record<string, unknown>) => void;

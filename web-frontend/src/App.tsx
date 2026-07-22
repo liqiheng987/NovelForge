@@ -8,7 +8,8 @@ import LeftPanel from "./components/LeftPanel";
 import RightPanel from "./components/RightPanel";
 import SettingsDialog from "./components/SettingsDialog";
 import type { ApiProfile, ApiProfilesState } from "./components/SettingsDialog";
-import { agentFetch, api, errorDetail, initializeAgentConnection, readSse } from "./api/client";
+import { agentFetch, api, errorDetail, initializeAgentConnection, readSse, resetAgentConnection } from "./api/client";
+import type { AgentServiceStatus } from "./api/client";
 import { useChapterStore } from "./stores/chapterStore";
 import { useChatStore } from "./stores/chatStore";
 import { useMaterialSelectionStore } from "./stores/materialStore";
@@ -54,6 +55,7 @@ export default function App() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [apiProfiles, setApiProfiles] = useState<ApiProfilesState>(DEFAULT_API_PROFILES);
   const abortRef = useRef<AbortController | null>(null);
+  const agentInstanceRef = useRef<string | null>(null);
 
   const sessions = useChatStore((state) => state.sessions);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
@@ -97,21 +99,49 @@ export default function App() {
     if ("__TAURI_INTERNALS__" in window) { invoke<string | null>("load_api_profiles").then((value) => { const restored = value ? parseApiProfiles(value) : null; if (restored) setApiProfiles(restored); }).catch(() => undefined); invoke<string>("ping").then((value) => setRustStatus(value === "pong" ? "在线" : value)).catch(() => setRustStatus("离线")); }
     let active = true;
     const connect = async () => {
+      let lastError = "Agent 未响应";
       for (let attempt = 0; attempt < 60 && active; attempt += 1) {
         try {
           const connection = await initializeAgentConnection();
           const health = await api<{ instance_id?: string }>("/health");
           if (connection.instanceId !== "development" && health.instance_id !== connection.instanceId) throw new Error("Agent 实例校验失败");
+          agentInstanceRef.current = connection.instanceId;
           setAgentStatus("在线"); await loadMaterials();
           const availableProjects = await refreshProjects(); const current = availableProjects.find((project) => project.active) ?? availableProjects[0];
           if (current) { setCurrentProjectId(current.id); const availableSessions = await refreshSessions(current.id); const session = availableSessions.find((item) => item.active) ?? availableSessions[0]; if (session) await switchSession(session.id); }
           return;
-        } catch { await new Promise((resolve) => window.setTimeout(resolve, 500)); }
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : typeof error === "string" ? error : "Agent 未响应";
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+        }
       }
-      if (active) { setAgentStatus("离线"); setMaterialsLoading(false); notify("AI Agent 未就绪，请重启应用"); }
+      if (active) { setAgentStatus("离线"); setMaterialsLoading(false); notify(`AI Agent 未就绪：${lastError}`); }
     };
     void connect(); return () => { active = false; abortRef.current?.abort(); };
   }, [loadMaterials, notify, refreshProjects, refreshSessions, switchSession]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let active = true;
+    const checkAgent = async () => {
+      try {
+        const status = await invoke<AgentServiceStatus>("agent_service_status");
+        if (!active) return;
+        setAgentStatus(status.status === "online" ? "在线" : status.status === "recovering" ? "恢复中" : "离线");
+        if (status.instanceId && agentInstanceRef.current && status.instanceId !== agentInstanceRef.current) {
+          resetAgentConnection();
+          window.location.reload();
+          return;
+        }
+        if (status.instanceId) agentInstanceRef.current = status.instanceId;
+      } catch {
+        if (active) setAgentStatus("离线");
+      }
+    };
+    void checkAgent();
+    const timer = window.setInterval(() => void checkAgent(), 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   const stagePaths = useCallback(async (paths: string[]) => {
     const existingPaths = new Set(pendingFiles.map((file) => file.path));

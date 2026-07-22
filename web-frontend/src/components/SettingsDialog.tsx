@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   Check,
   CircleCheck,
   Database,
   Eye,
   EyeOff,
+  FileDown,
+  FolderOpen,
   LoaderCircle,
   Plus,
+  RefreshCw,
   RotateCcw,
   Server,
   Settings2,
@@ -14,7 +18,8 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { agentFetch } from "../api/client";
+import { agentFetch, refreshAgentConnection } from "../api/client";
+import type { AgentServiceStatus } from "../api/client";
 
 export type ApiProfile = {
   id: string;
@@ -58,6 +63,8 @@ type DatabaseBackup = {
   error?: string;
 };
 
+type ServiceAction = "restart" | "logs" | "diagnostics" | null;
+
 type SettingsDialogProps = {
   settings: ApiProfilesState;
   onClose: () => void;
@@ -92,6 +99,9 @@ const formatBackupTime = (value: string) => {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
 };
 
+const actionError = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
+
 export default function SettingsDialog({
   settings,
   onClose,
@@ -107,6 +117,15 @@ export default function SettingsDialog({
   const [backups, setBackups] = useState<DatabaseBackup[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(true);
   const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
+  const [serviceStatus, setServiceStatus] = useState<AgentServiceStatus>({
+    status: "recovering",
+    detail: "正在读取 Agent 状态",
+    restartCount: 0,
+    startedAt: null,
+    instanceId: null,
+  });
+  const [serviceAction, setServiceAction] = useState<ServiceAction>(null);
+  const [serviceMessage, setServiceMessage] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const activeProfile = useMemo(
@@ -144,6 +163,33 @@ export default function SettingsDialog({
     const controller = new AbortController();
     void loadBackups(controller.signal);
     return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      setServiceStatus({
+        status: "online",
+        detail: "浏览器预览模式使用开发 Agent",
+        restartCount: 0,
+        startedAt: null,
+        instanceId: "development",
+      });
+      return;
+    }
+    let active = true;
+    const loadStatus = async () => {
+      try {
+        const status = await invoke<AgentServiceStatus>("agent_service_status");
+        if (active) setServiceStatus(status);
+      } catch (error) {
+        if (active) {
+          setServiceStatus((current) => ({ ...current, status: "offline", detail: actionError(error, "无法读取 Agent 状态") }));
+        }
+      }
+    };
+    void loadStatus();
+    const timer = window.setInterval(() => void loadStatus(), 2000);
+    return () => { active = false; window.clearInterval(timer); };
   }, []);
 
   const updateActiveProfile = (changes: Partial<ApiProfile>) => {
@@ -254,6 +300,51 @@ export default function SettingsDialog({
     } catch (error) {
       setBackupState({ kind: "error", message: error instanceof Error ? error.message : "恢复失败，当前数据未改变" });
       setRestoringBackup(null);
+    }
+  };
+
+  const restartAgent = async () => {
+    if (serviceAction) return;
+    if (!window.confirm("确定重新启动 Agent 吗？正在进行的生成会暂停，但已保存进度可以继续。")) return;
+    setServiceAction("restart");
+    setServiceMessage("正在安全重启 Agent…");
+    try {
+      const status = await invoke<AgentServiceStatus>("restart_agent");
+      setServiceStatus(status);
+      setServiceMessage("Agent 已恢复，正在重新载入工作台…");
+      await refreshAgentConnection();
+      window.location.reload();
+    } catch (error) {
+      setServiceMessage(actionError(error, "Agent 重启失败，请查看日志"));
+      setServiceAction(null);
+    }
+  };
+
+  const openAgentLogs = async () => {
+    if (serviceAction) return;
+    setServiceAction("logs");
+    setServiceMessage("");
+    try {
+      await invoke<string>("open_agent_logs");
+      setServiceMessage("日志目录已打开");
+    } catch (error) {
+      setServiceMessage(actionError(error, "无法打开日志目录"));
+    } finally {
+      setServiceAction(null);
+    }
+  };
+
+  const exportDiagnostics = async () => {
+    if (serviceAction) return;
+    setServiceAction("diagnostics");
+    setServiceMessage("");
+    try {
+      const path = await invoke<string | null>("export_diagnostics");
+      if (path) setServiceMessage("脱敏诊断报告已导出");
+    } catch (error) {
+      setServiceMessage(actionError(error, "诊断报告导出失败"));
+    } finally {
+      setServiceAction(null);
     }
   };
 
@@ -378,6 +469,26 @@ export default function SettingsDialog({
               {testState.kind === "success" && <><CircleCheck size={15} /><span>{testState.message}</span></>}
               {testState.kind === "error" && <><TriangleAlert size={15} /><span>{testState.message}</span></>}
               {testState.kind === "idle" && <><Server size={15} /><span>测试会同时验证连接、Key、模型 ID 与结构化 JSON 输出。</span></>}
+            </div>
+            <div className={`settings-service-panel ${serviceStatus.status}`}>
+              <div className="settings-service-status">
+                <span className="settings-service-indicator" />
+                <span>
+                  <strong>本地 Agent 服务</strong>
+                  <small>{serviceMessage || serviceStatus.detail}{serviceStatus.restartCount > 0 ? ` · 已恢复 ${serviceStatus.restartCount} 次` : ""}</small>
+                </span>
+              </div>
+              <div className="settings-service-actions">
+                <button disabled={Boolean(serviceAction) || !("__TAURI_INTERNALS__" in window)} type="button" onClick={() => void restartAgent()}>
+                  {serviceAction === "restart" ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}重启
+                </button>
+                <button disabled={Boolean(serviceAction) || !("__TAURI_INTERNALS__" in window)} type="button" onClick={() => void openAgentLogs()}>
+                  <FolderOpen size={13} />日志
+                </button>
+                <button disabled={Boolean(serviceAction) || !("__TAURI_INTERNALS__" in window)} type="button" onClick={() => void exportDiagnostics()}>
+                  {serviceAction === "diagnostics" ? <LoaderCircle className="spin" size={13} /> : <FileDown size={13} />}诊断报告
+                </button>
+              </div>
             </div>
             <div className={`settings-backup-panel ${backupState.kind}`}>
               <div className="settings-backup-toolbar">

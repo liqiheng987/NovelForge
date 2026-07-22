@@ -145,7 +145,7 @@ fn safe_file_name(file_name: &str, extension: &str) -> String {
     format!("{safe_stem}.{extension}")
 }
 
-fn write_export_file(
+pub(crate) fn write_export_file(
     directory: &Path,
     file_name: &str,
     extension: &str,
@@ -183,7 +183,7 @@ fn write_export_file(
     Err("too many files with the same export name".to_string())
 }
 
-fn open_folder(path: &Path) -> Result<(), String> {
+pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     Command::new("explorer.exe")
         .arg(path)
