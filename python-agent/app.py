@@ -73,6 +73,7 @@ from database import (
     import_universe_rules,
     initialize_database,
     list_chapters,
+    list_database_backups,
     list_chapter_versions,
     list_deleted_chapters,
     list_facts,
@@ -93,6 +94,7 @@ from database import (
     reorder_chapters,
     record_generation_progress,
     restore_chapter_version,
+    restore_database_backup,
     purge_deleted_chapter,
     resolve_impact,
     save_assistant_message,
@@ -116,6 +118,7 @@ from database import (
 from models import (
     AnalyzeRequest,
     ApiConfig,
+    BackupRestoreRequest,
     BranchCompareRequest,
     BranchCreateRequest,
     BranchMergeRequest,
@@ -244,6 +247,19 @@ async def maintenance_database_status() -> dict[str, Any]:
 async def maintenance_database_backup() -> dict[str, Any]:
     try:
         return {"backup": await asyncio.to_thread(create_database_backup, True)}
+    except ValueError as error:
+        raise as_http_error(error) from error
+
+
+@app.get("/maintenance/backups")
+async def maintenance_database_backups() -> dict[str, Any]:
+    return {"backups": await asyncio.to_thread(list_database_backups, True)}
+
+
+@app.post("/maintenance/restore")
+async def maintenance_database_restore(request: BackupRestoreRequest) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(restore_database_backup, request.name)
     except ValueError as error:
         raise as_http_error(error) from error
 

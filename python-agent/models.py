@@ -19,6 +19,14 @@ class ApiConfig(BaseModel):
     model: str = Field(min_length=1, max_length=200)
 
 
+class BackupRestoreRequest(BaseModel):
+    name: str = Field(
+        min_length=1,
+        max_length=120,
+        pattern=r"^novel_forge-\d{8}-\d{6}(?:-\d{2})?\.db$",
+    )
+
+
 class AnalyzeRequest(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=5)
     api_config: ApiConfig

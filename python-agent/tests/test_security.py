@@ -124,6 +124,50 @@ class AgentAuthenticationTests(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["status"], "ok")
 
+    def test_authenticated_client_can_list_and_restore_database_backups(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        old_project = app_module.create_project("接口恢复目标")
+        created = self.client.post("/maintenance/backup", headers=headers)
+        backup = created.json()["backup"]
+        added_project = app_module.create_project("接口恢复后新增")
+
+        listed = self.client.get("/maintenance/backups", headers=headers)
+        self.assertEqual(listed.status_code, 200)
+        records = {item["name"]: item for item in listed.json()["backups"]}
+        self.assertTrue(records[backup["name"]]["valid"])
+
+        restored = self.client.post(
+            "/maintenance/restore",
+            headers=headers,
+            json={"name": backup["name"]},
+        )
+        self.assertEqual(restored.status_code, 200)
+        project_ids = {project["id"] for project in self.client.get("/projects", headers=headers).json()}
+        self.assertIn(old_project["id"], project_ids)
+        self.assertNotIn(added_project["id"], project_ids)
+
+    def test_database_restore_rejects_invalid_names_and_marks_corrupt_backups(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        traversal = self.client.post(
+            "/maintenance/restore",
+            headers=headers,
+            json={"name": "../evil.db"},
+        )
+        self.assertEqual(traversal.status_code, 422)
+
+        corrupt = app_module.database_path().parent / "backups" / "novel_forge-20260722-100000.db"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_bytes(b"broken")
+        listed = self.client.get("/maintenance/backups", headers=headers)
+        record = next(item for item in listed.json()["backups"] if item["name"] == corrupt.name)
+        self.assertFalse(record["valid"])
+        refused = self.client.post(
+            "/maintenance/restore",
+            headers=headers,
+            json={"name": corrupt.name},
+        )
+        self.assertEqual(refused.status_code, 400)
+
     def test_project_can_be_renamed_and_safely_deleted_with_backup(self) -> None:
         headers = {"Authorization": "Bearer test-agent-token"}
         created = self.client.post(

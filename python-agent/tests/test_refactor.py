@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -6,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 AGENT_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +57,84 @@ class RefactorDatabaseTests(unittest.TestCase):
         self.assertEqual(status["status"], "ok")
         self.assertEqual(status["backup_count"], 1)
         self.assertEqual(status["latest_backup"]["path"], backup["path"])
+
+    def test_forced_backups_created_in_the_same_second_have_unique_names(self) -> None:
+        fixed_time = datetime(2026, 7, 22, 8, 30, 15, tzinfo=timezone.utc)
+        with patch.object(database, "datetime") as mocked_datetime:
+            mocked_datetime.now.return_value = fixed_time
+            mocked_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            first = database.create_database_backup(force=True)
+            second = database.create_database_backup(force=True)
+
+        self.assertNotEqual(first["name"], second["name"])
+        self.assertEqual(second["name"], "novel_forge-20260722-083015-01.db")
+        self.assertTrue(Path(first["path"]).is_file())
+        self.assertTrue(Path(second["path"]).is_file())
+
+    def test_database_restore_recovers_old_data_and_preserves_safety_backup(self) -> None:
+        database.create_project("恢复前作品")
+        old_backup = database.create_database_backup(force=True)
+        database.create_project("恢复前新增内容")
+
+        result = database.restore_database_backup(old_backup["name"])
+
+        restored_titles = {project["title"] for project in database.list_projects()}
+        self.assertIn("恢复前作品", restored_titles)
+        self.assertNotIn("恢复前新增内容", restored_titles)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["restored_backup"]["name"], old_backup["name"])
+        with closing(sqlite3.connect(result["safety_backup"]["path"])) as snapshot:
+            safety_titles = {row[0] for row in snapshot.execute("SELECT title FROM projects")}
+        self.assertIn("恢复前新增内容", safety_titles)
+
+    def test_corrupt_database_backup_is_rejected_without_changing_current_data(self) -> None:
+        database.create_project("当前数据不可丢失")
+        corrupt = database.backup_directory() / "novel_forge-20260722-090000.db"
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_bytes(b"not a sqlite database")
+
+        listed = {item["name"]: item for item in database.list_database_backups(True)}
+        self.assertFalse(listed[corrupt.name]["valid"])
+        with self.assertRaises(ValueError):
+            database.restore_database_backup(corrupt.name)
+        self.assertIn("当前数据不可丢失", {project["title"] for project in database.list_projects()})
+
+    def test_running_generation_task_blocks_database_restore(self) -> None:
+        project = database.create_project("生成中作品")
+        backup = database.create_database_backup(force=True)
+        database.begin_generation_task(
+            "running-task",
+            project["session_id"],
+            project["id"],
+            "assistant-placeholder",
+            {"message": "继续写作"},
+            1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "生成任务正在运行"):
+            database.restore_database_backup(backup["name"])
+
+    def test_database_restore_rolls_back_when_initialization_fails(self) -> None:
+        database.create_project("备份中的旧数据")
+        old_backup = database.create_database_backup(force=True)
+        database.create_project("必须保留的当前数据")
+        initialize_database = database.initialize_database
+        calls = 0
+
+        def fail_once() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("simulated initialization failure")
+            initialize_database()
+
+        with patch.object(database, "initialize_database", side_effect=fail_once):
+            with self.assertRaisesRegex(ValueError, "恢复备份失败"):
+                database.restore_database_backup(old_backup["name"])
+
+        titles = {project["title"] for project in database.list_projects()}
+        self.assertIn("必须保留的当前数据", titles)
+        self.assertEqual(calls, 2)
 
     def test_rules_facts_and_memory_are_project_scoped(self) -> None:
         first = database.create_project("第一宇宙")["id"]

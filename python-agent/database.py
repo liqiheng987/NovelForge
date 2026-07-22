@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 
@@ -61,6 +62,9 @@ CHAPTER_CONTEXT_LIMIT = 150000
 CHAPTER_SUMMARY_LIMIT = 1200
 CHAPTER_VERSION_RETENTION = 50
 BACKUP_RETENTION = 7
+BACKUP_NAME_PATTERN = re.compile(r"^novel_forge-\d{8}-\d{6}(?:-\d{2})?\.db$")
+REQUIRED_BACKUP_TABLES = {"projects", "sessions", "messages", "chapters"}
+_DATABASE_MAINTENANCE_LOCK = RLock()
 CHAPTER_MEMORY_LIST_FIELDS = (
     "key_events",
     "character_changes",
@@ -115,54 +119,166 @@ def backup_directory() -> Path:
     return database_path().parent / "backups"
 
 
-def list_database_backups() -> list[dict[str, Any]]:
+def _inspect_database_file(path: Path) -> tuple[bool, str | None]:
+    if path.is_symlink():
+        return False, "备份不能是符号链接"
+    try:
+        uri = path.resolve(strict=True).as_uri()
+        with closing(sqlite3.connect(f"{uri}?mode=ro", uri=True)) as connection:
+            check = connection.execute("PRAGMA quick_check").fetchone()
+            if not check or str(check[0]).lower() != "ok":
+                return False, "完整性检查未通过"
+            tables = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+    except (OSError, sqlite3.Error) as error:
+        return False, f"无法读取备份：{error}"
+    missing = sorted(REQUIRED_BACKUP_TABLES - tables)
+    if missing:
+        return False, f"缺少必要数据表：{', '.join(missing)}"
+    return True, None
+
+
+def _backup_record(path: Path, include_integrity: bool = False) -> dict[str, Any]:
+    metadata = path.stat()
+    record: dict[str, Any] = {
+        "path": str(path),
+        "name": path.name,
+        "size": metadata.st_size,
+        "created_at": datetime.fromtimestamp(metadata.st_mtime, timezone.utc).isoformat(),
+    }
+    if include_integrity:
+        valid, error = _inspect_database_file(path)
+        record["valid"] = valid
+        if error:
+            record["error"] = error
+    return record
+
+
+def list_database_backups(include_integrity: bool = False) -> list[dict[str, Any]]:
     directory = backup_directory()
     if not directory.is_dir():
         return []
     records = []
-    for path in sorted(directory.glob("novel_forge-*.db"), reverse=True):
+    paths = sorted(
+        (
+            path
+            for path in directory.glob("novel_forge-*.db")
+            if BACKUP_NAME_PATTERN.fullmatch(path.name)
+        ),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for path in paths:
         try:
-            metadata = path.stat()
+            records.append(_backup_record(path, include_integrity))
         except OSError:
             continue
-        records.append(
-            {
-                "path": str(path),
-                "name": path.name,
-                "size": metadata.st_size,
-                "created_at": datetime.fromtimestamp(metadata.st_mtime, timezone.utc).isoformat(),
-            }
-        )
     return records
 
 
 def create_database_backup(force: bool = True) -> dict[str, Any]:
-    source_path = database_path()
-    if not source_path.is_file() or source_path.stat().st_size == 0:
-        raise ValueError("数据库尚未创建，暂时无法备份")
-    directory = backup_directory()
-    directory.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc)
-    daily_prefix = f"novel_forge-{timestamp:%Y%m%d}-"
-    existing = next(iter(sorted(directory.glob(f"{daily_prefix}*.db"), reverse=True)), None)
-    if existing and not force:
-        return next(record for record in list_database_backups() if record["path"] == str(existing))
-    target = directory / f"{daily_prefix}{timestamp:%H%M%S}.db"
-    temporary = target.with_suffix(".tmp")
-    try:
-        with closing(connect()) as source, closing(sqlite3.connect(temporary)) as destination:
-            source.backup(destination)
-            check = destination.execute("PRAGMA quick_check").fetchone()
-            if not check or str(check[0]).lower() != "ok":
-                raise ValueError("备份完整性检查失败")
-        temporary.replace(target)
-    finally:
-        if temporary.exists():
+    with _DATABASE_MAINTENANCE_LOCK:
+        source_path = database_path()
+        if not source_path.is_file() or source_path.stat().st_size == 0:
+            raise ValueError("数据库尚未创建，暂时无法备份")
+        directory = backup_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc)
+        daily_prefix = f"novel_forge-{timestamp:%Y%m%d}-"
+        existing = next(iter(sorted(directory.glob(f"{daily_prefix}*.db"), reverse=True)), None)
+        if existing and not force:
+            valid, _ = _inspect_database_file(existing)
+            if valid:
+                return _backup_record(existing)
+        stem = f"{daily_prefix}{timestamp:%H%M%S}"
+        target = directory / f"{stem}.db"
+        counter = 0
+        while target.exists():
+            counter += 1
+            if counter > 99:
+                raise ValueError("同一时间创建的备份过多，请稍后再试")
+            target = directory / f"{stem}-{counter:02d}.db"
+        temporary = directory / f".{target.name}.{uuid4().hex}.tmp"
+        try:
+            with closing(connect()) as source, closing(sqlite3.connect(temporary)) as destination:
+                source.backup(destination)
+                check = destination.execute("PRAGMA quick_check").fetchone()
+                if not check or str(check[0]).lower() != "ok":
+                    raise ValueError("备份完整性检查失败")
+            temporary.replace(target)
+        finally:
             temporary.unlink(missing_ok=True)
-    backups = list_database_backups()
-    for stale in backups[BACKUP_RETENTION:]:
-        Path(stale["path"]).unlink(missing_ok=True)
-    return next(record for record in list_database_backups() if record["path"] == str(target))
+        backups = list_database_backups()
+        for stale in backups[BACKUP_RETENTION:]:
+            Path(stale["path"]).unlink(missing_ok=True)
+        return _backup_record(target)
+
+
+def _validated_backup_path(name: str) -> Path:
+    if not BACKUP_NAME_PATTERN.fullmatch(name):
+        raise ValueError("备份文件名无效")
+    directory = backup_directory()
+    path = directory / name
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("备份不存在或不可用")
+    try:
+        if path.resolve(strict=True).parent != directory.resolve(strict=True):
+            raise ValueError("备份路径无效")
+    except OSError as error:
+        raise ValueError("备份不存在或不可用") from error
+    valid, error = _inspect_database_file(path)
+    if not valid:
+        raise ValueError(error or "备份完整性检查失败")
+    return path
+
+
+def restore_database_backup(name: str) -> dict[str, Any]:
+    with _DATABASE_MAINTENANCE_LOCK:
+        source = _validated_backup_path(name)
+        restored_record = _backup_record(source, include_integrity=True)
+        with closing(connect()) as connection:
+            running = table_exists(connection, "generation_tasks") and connection.execute(
+                "SELECT 1 FROM generation_tasks WHERE status='running' LIMIT 1"
+            ).fetchone()
+        if running:
+            raise ValueError("有生成任务正在运行，请等待任务结束或取消后再恢复")
+
+        directory = backup_directory()
+        staged = directory / f".restore-{uuid4().hex}.db"
+        rollback = directory / f".rollback-{uuid4().hex}.db"
+        safety_backup: dict[str, Any] | None = None
+        replaced = False
+        try:
+            shutil.copy2(source, staged)
+            valid, error = _inspect_database_file(staged)
+            if not valid:
+                raise ValueError(error or "备份完整性检查失败")
+            safety_backup = create_database_backup(force=True)
+            os.replace(staged, database_path())
+            replaced = True
+            initialize_database()
+        except Exception as error:
+            if replaced and safety_backup:
+                try:
+                    shutil.copy2(Path(safety_backup["path"]), rollback)
+                    os.replace(rollback, database_path())
+                    initialize_database()
+                except Exception as rollback_error:
+                    raise ValueError(f"恢复失败，自动回滚也失败：{rollback_error}") from error
+            if isinstance(error, ValueError):
+                raise
+            raise ValueError(f"恢复备份失败：{error}") from error
+        finally:
+            staged.unlink(missing_ok=True)
+            rollback.unlink(missing_ok=True)
+
+        return {
+            "status": "ok",
+            "restored_backup": restored_record,
+            "safety_backup": safety_backup,
+        }
 
 
 def database_status() -> dict[str, Any]:

@@ -1468,8 +1468,8 @@ button:disabled {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 17px;
-  padding: 18px;
+  gap: 12px;
+  padding: 14px 18px;
   overflow-y: auto;
 }
 
@@ -1534,7 +1534,7 @@ button:disabled {
   grid-template-columns: 34px minmax(0, 1fr) 18px;
   align-items: center;
   gap: 9px;
-  padding: 12px;
+  padding: 10px 12px;
   color: var(--muted-strong);
   text-align: left;
   background: var(--surface);
@@ -1584,7 +1584,7 @@ button:disabled {
 .settings-form {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 9px;
 }
 
 .settings-form label,
@@ -1708,36 +1708,87 @@ button:disabled {
   font-size: 0.61rem;
 }
 
-.settings-backup-card {
+.settings-backup-panel {
+  flex: none;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.settings-backup-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 10px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--line);
-  border-radius: 8px;
 }
 
-.settings-backup-card > div,
-.settings-backup-card > div > span {
+.settings-backup-toolbar > div,
+.settings-backup-toolbar > div > span {
   display: flex;
   gap: 7px;
 }
 
-.settings-backup-card > div > span {
+.settings-backup-toolbar > div > span {
   flex-direction: column;
   gap: 2px;
 }
 
-.settings-backup-card strong,
-.settings-backup-card small {
+.settings-backup-panel strong,
+.settings-backup-panel small {
   font-size: 0.61rem;
 }
 
-.settings-backup-card.success { color: #a6edcf; }
-.settings-backup-card.error { color: #ffc1c9; }
+.settings-backup-panel.success .settings-backup-toolbar { color: #a6edcf; }
+.settings-backup-panel.error .settings-backup-toolbar { color: #ffc1c9; }
+
+.settings-backup-list {
+  max-height: 150px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.settings-backup-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 42px;
+  padding: 7px 10px;
+}
+
+.settings-backup-row + .settings-backup-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.settings-backup-row.invalid { color: #ffc1c9; }
+.settings-backup-row.valid .settings-backup-status { color: #a6edcf; }
+
+.settings-backup-meta {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-backup-meta strong,
+.settings-backup-meta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-backup-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 8px;
+  font-size: 0.61rem;
+}
 
 .test-api-button {
   color: #c9c3f7;

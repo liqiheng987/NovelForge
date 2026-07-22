@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Check,
   CircleCheck,
@@ -7,6 +7,7 @@ import {
   EyeOff,
   LoaderCircle,
   Plus,
+  RotateCcw,
   Server,
   Settings2,
   Trash2,
@@ -49,6 +50,14 @@ type BackupState =
   | { kind: "success"; message: string }
   | { kind: "error"; message: string };
 
+type DatabaseBackup = {
+  name: string;
+  size: number;
+  created_at: string;
+  valid: boolean;
+  error?: string;
+};
+
 type SettingsDialogProps = {
   settings: ApiProfilesState;
   onClose: () => void;
@@ -67,10 +76,20 @@ const createProfile = (index: number): ApiProfile => ({
 const responseError = async (response: Response) => {
   try {
     const payload = (await response.json()) as { detail?: string };
-    return payload.detail || `测试失败（HTTP ${response.status}）`;
+    return payload.detail || `请求失败（HTTP ${response.status}）`;
   } catch {
-    return `测试失败（HTTP ${response.status}）`;
+    return `请求失败（HTTP ${response.status}）`;
   }
+};
+
+const formatBackupSize = (size: number) => {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+};
+
+const formatBackupTime = (value: string) => {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
 };
 
 export default function SettingsDialog({
@@ -85,6 +104,9 @@ export default function SettingsDialog({
   const [showApiKey, setShowApiKey] = useState(false);
   const [testState, setTestState] = useState<TestState>({ kind: "idle" });
   const [backupState, setBackupState] = useState<BackupState>({ kind: "idle", message: "每天首次启动自动备份，最多保留 7 份。" });
+  const [backups, setBackups] = useState<DatabaseBackup[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(true);
+  const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const activeProfile = useMemo(
@@ -102,6 +124,27 @@ export default function SettingsDialog({
     Boolean(activeProfile) &&
     profileValid(activeProfile) &&
     draft.profiles.every((profile) => Boolean(profile.name.trim()));
+
+  const loadBackups = async (signal?: AbortSignal) => {
+    setBackupsLoading(true);
+    try {
+      const response = await agentFetch("/maintenance/backups", { signal });
+      if (!response.ok) throw new Error(await responseError(response));
+      const result = (await response.json()) as { backups: DatabaseBackup[] };
+      setBackups(result.backups);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setBackupState({ kind: "error", message: error instanceof Error ? error.message : "无法读取备份列表" });
+    } finally {
+      if (!signal?.aborted) setBackupsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadBackups(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   const updateActiveProfile = (changes: Partial<ApiProfile>) => {
     setDraft((current) => ({
@@ -185,9 +228,32 @@ export default function SettingsDialog({
       const response = await agentFetch("/maintenance/backup", { method: "POST" });
       if (!response.ok) throw new Error(await responseError(response));
       const result = (await response.json()) as { backup: { name: string; size: number } };
-      setBackupState({ kind: "success", message: `备份完成：${result.backup.name}（${(result.backup.size / 1024 / 1024).toFixed(1)} MB）` });
+      setBackupState({ kind: "success", message: `备份完成：${result.backup.name}（${formatBackupSize(result.backup.size)}）` });
+      await loadBackups();
     } catch (error) {
       setBackupState({ kind: "error", message: error instanceof Error ? error.message : "备份失败，请稍后重试" });
+    }
+  };
+
+  const restoreBackup = async (backup: DatabaseBackup) => {
+    if (!backup.valid || restoringBackup || backupState.kind === "running") return;
+    const confirmed = window.confirm(
+      `确定恢复 ${formatBackupTime(backup.created_at)} 的创作数据吗？\n\n当前数据会先自动备份。恢复完成后，工作台将重新载入。`,
+    );
+    if (!confirmed) return;
+    setRestoringBackup(backup.name);
+    setBackupState({ kind: "running", message: "正在校验备份并安全恢复…" });
+    try {
+      const response = await agentFetch("/maintenance/restore", {
+        method: "POST",
+        body: JSON.stringify({ name: backup.name }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      setBackupState({ kind: "success", message: "数据恢复完成，正在重新载入工作台…" });
+      window.location.reload();
+    } catch (error) {
+      setBackupState({ kind: "error", message: error instanceof Error ? error.message : "恢复失败，当前数据未改变" });
+      setRestoringBackup(null);
     }
   };
 
@@ -313,9 +379,36 @@ export default function SettingsDialog({
               {testState.kind === "error" && <><TriangleAlert size={15} /><span>{testState.message}</span></>}
               {testState.kind === "idle" && <><Server size={15} /><span>测试会同时验证连接、Key、模型 ID 与结构化 JSON 输出。</span></>}
             </div>
-            <div className={`settings-backup-card ${backupState.kind}`}>
-              <div><Database size={16} /><span><strong>创作数据保护</strong><small>{backupState.message}</small></span></div>
-              <button disabled={backupState.kind === "running"} type="button" onClick={() => void createBackup()}>{backupState.kind === "running" ? "备份中…" : "立即备份"}</button>
+            <div className={`settings-backup-panel ${backupState.kind}`}>
+              <div className="settings-backup-toolbar">
+                <div><Database size={16} /><span><strong>创作数据保护</strong><small>{backupState.message}</small></span></div>
+                <button disabled={backupState.kind === "running" || Boolean(restoringBackup)} type="button" onClick={() => void createBackup()}>{backupState.kind === "running" && !restoringBackup ? "备份中…" : "立即备份"}</button>
+              </div>
+              <div className="settings-backup-list" aria-label="可用备份">
+                {backupsLoading && <div className="settings-backup-empty"><LoaderCircle className="spin" size={14} />正在检查备份…</div>}
+                {!backupsLoading && backups.length === 0 && <div className="settings-backup-empty">还没有可恢复的备份</div>}
+                {!backupsLoading && backups.map((backup) => (
+                  <div className={`settings-backup-row ${backup.valid ? "valid" : "invalid"}`} key={backup.name}>
+                    <span className="settings-backup-status" title={backup.valid ? "完整性检查通过" : backup.error || "备份不可用"}>
+                      {backup.valid ? <CircleCheck size={14} /> : <TriangleAlert size={14} />}
+                    </span>
+                    <span className="settings-backup-meta">
+                      <strong>{formatBackupTime(backup.created_at)}</strong>
+                      <small>{formatBackupSize(backup.size)} · {backup.valid ? "可恢复" : backup.error || "文件损坏"}</small>
+                    </span>
+                    <button
+                      aria-label={`恢复 ${formatBackupTime(backup.created_at)} 的备份`}
+                      disabled={!backup.valid || Boolean(restoringBackup) || backupState.kind === "running"}
+                      title={backup.valid ? "恢复此备份" : backup.error || "此备份不可恢复"}
+                      type="button"
+                      onClick={() => void restoreBackup(backup)}
+                    >
+                      {restoringBackup === backup.name ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
+                      {restoringBackup === backup.name ? "恢复中…" : "恢复"}
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
             {saveError && <div className="settings-save-error">{saveError}</div>}
           </div>
