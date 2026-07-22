@@ -9,7 +9,7 @@ NovelForge 是一款面向长篇小说创作的本地桌面工作台。它把素
 
 ## 下载与安装
 
-从 [NovelForge v0.1.0 Release](https://github.com/liqiheng987/NovelForge/releases/tag/v0.1.0) 下载 Windows x64 安装包：
+项目和 Release 已公开。任何用户都可以从 [NovelForge v0.1.0 Release](https://github.com/liqiheng987/NovelForge/releases/tag/v0.1.0) 下载 Windows x64 安装包：
 
 - `NovelForge_0.1.0_x64-setup.exe`：常规安装程序。
 - `NovelForge_0.1.0_x64_en-US.msi`：Windows Installer 安装包。
@@ -23,8 +23,6 @@ NovelForge 是一款面向长篇小说创作的本地桌面工作台。它把素
 - 安装版内置 Agent 启动和数据库初始化。
 
 当前安装包尚未进行 Authenticode 代码签名，Windows SmartScreen 可能显示未知发布者警告。代码签名完成前，建议只从本仓库的 Release 页面下载安装包，并使用 `SHA256SUMS.txt` 核对文件。
-
-> 当前仓库为私有仓库，只有已获授权的 GitHub 用户能够访问 Release。正式公开分发前还需要确定仓库可见性或独立下载渠道。
 
 ## 主要能力
 
@@ -187,7 +185,6 @@ pnpm build
 - 当前没有应用内自动更新器，需要手动下载安装新版本。
 - 前端尚未建立组件测试和完整桌面 UI E2E；安装器 E2E 已投入使用。
 - 当前主要面向 Windows x64，其他桌面平台尚未完成发布验收。
-- 仓库当前为私有状态，Release 不能直接提供给所有外部用户。
 
 ## 安全说明
 
