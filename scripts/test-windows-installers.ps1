@@ -60,7 +60,7 @@ function Get-InstalledEntry {
         if (!(Test-Path $root)) { continue }
         $entry = Get-ChildItem $root -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
-            Where-Object { $_.DisplayName -eq "NovelForge" } |
+            Where-Object { $_.PSObject.Properties["DisplayName"] -and $_.DisplayName -eq "NovelForge" } |
             Select-Object -First 1
         if ($entry) { return $entry }
     }
@@ -91,6 +91,9 @@ function Get-InstalledExecutable {
 function Assert-InstalledVersion([string]$Expected) {
     $entry = Get-InstalledEntry
     if (!$entry) { throw "NovelForge is not registered as an installed application" }
+    if (!$entry.PSObject.Properties["DisplayVersion"]) {
+        throw "NovelForge uninstall registration has no DisplayVersion"
+    }
     if ([string]$entry.DisplayVersion -ne $Expected) {
         throw "Expected installed version $Expected, found $($entry.DisplayVersion)"
     }

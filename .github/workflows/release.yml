@@ -51,6 +51,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: windows-release-rust-${{ hashFiles('src-tauri/Cargo.lock') }}
+
       - name: Verify release version
         shell: pwsh
         run: ./scripts/check-release-version.ps1 -Tag $env:RELEASE_TAG
