@@ -40,6 +40,16 @@ function Stop-NovelForgeProcesses {
     Start-Sleep -Seconds 2
 }
 
+function Write-AgentDiagnostics {
+    $logs = Join-Path $env:APPDATA "NovelForge\logs"
+    if (!(Test-Path -LiteralPath $logs -PathType Container)) { return }
+    Get-ChildItem -LiteralPath $logs -File -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Write-Output "--- $($_.Name) ---"
+            Get-Content -Tail 120 -LiteralPath $_.FullName -ErrorAction SilentlyContinue
+        }
+}
+
 function Invoke-Msi([string]$Operation, [string]$Path, [string]$LogName) {
     $logPath = Join-Path $env:RUNNER_TEMP $LogName
     $arguments = @($Operation, "`"$Path`"", "/qn", "/norestart", "/L*v", "`"$logPath`"")
@@ -110,14 +120,14 @@ function Test-AppStartup([string]$Label, [bool]$ValidateSignature = $true) {
     while ((Get-Date) -lt $deadline) {
         $process.Refresh()
         if ($process.HasExited) {
-            $logs = Join-Path $env:APPDATA "NovelForge\logs"
-            if (Test-Path $logs) { Get-ChildItem $logs -File | ForEach-Object { Get-Content -Tail 80 $_.FullName } }
+            Write-AgentDiagnostics
             throw "NovelForge exited during $Label with code $($process.ExitCode)"
         }
         if (Test-Path -LiteralPath $database -PathType Leaf) { break }
         Start-Sleep -Seconds 2
     }
     if (!(Test-Path -LiteralPath $database -PathType Leaf)) {
+        Write-AgentDiagnostics
         throw "NovelForge did not initialize its data store during $Label"
     }
     Stop-NovelForgeProcesses

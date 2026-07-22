@@ -120,7 +120,28 @@ fn python_agent_binary(resource_dir: Option<&Path>) -> Option<PathBuf> {
     };
     let mut candidates = Vec::new();
     if let Some(resources) = resource_dir {
+        candidates.push(
+            resources
+                .join("python-agent")
+                .join("novelforge-agent")
+                .join(binary_name),
+        );
         candidates.push(resources.join("python-agent").join(binary_name));
+        candidates.push(
+            resources
+                .join("_up_")
+                .join("python-agent")
+                .join("dist")
+                .join("novelforge-agent")
+                .join(binary_name),
+        );
+        candidates.push(
+            resources
+                .join("_up_")
+                .join("python-agent")
+                .join("novelforge-agent")
+                .join(binary_name),
+        );
         candidates.push(
             resources
                 .join("_up_")
@@ -828,6 +849,27 @@ mod tests {
     #[test]
     fn available_port_is_nonzero() {
         assert!(available_agent_port().is_some_and(|port| port > 0));
+    }
+
+    #[test]
+    fn packaged_onedir_agent_is_discovered() {
+        let directory =
+            std::env::temp_dir().join(format!("novelforge-resource-test-{}", Uuid::new_v4()));
+        let binary_name = if cfg!(target_os = "windows") {
+            "novelforge-agent.exe"
+        } else {
+            "novelforge-agent"
+        };
+        let binary = directory
+            .join("python-agent")
+            .join("novelforge-agent")
+            .join(binary_name);
+        fs::create_dir_all(binary.parent().expect("agent binary parent"))
+            .expect("create packaged agent directory");
+        fs::write(&binary, b"test").expect("create packaged agent binary");
+
+        assert_eq!(python_agent_binary(Some(&directory)), Some(binary));
+        fs::remove_dir_all(directory).expect("remove packaged agent test directory");
     }
 
     #[test]
