@@ -1,5 +1,7 @@
+from contextlib import closing
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -121,6 +123,45 @@ class AgentAuthenticationTests(unittest.TestCase):
         status = self.client.get("/maintenance/database", headers=headers)
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["status"], "ok")
+
+    def test_project_can_be_renamed_and_safely_deleted_with_backup(self) -> None:
+        headers = {"Authorization": "Bearer test-agent-token"}
+        created = self.client.post(
+            "/projects",
+            headers=headers,
+            json={"title": "待整理作品", "mode": "guided"},
+        )
+        self.assertEqual(created.status_code, 200)
+        project = created.json()["project"]
+
+        renamed = self.client.put(
+            f"/projects/{project['id']}",
+            headers=headers,
+            json={"title": "最终作品名"},
+        )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()["title"], "最终作品名")
+        self.assertTrue(renamed.json()["active"])
+
+        deleted = self.client.delete(f"/projects/{project['id']}", headers=headers)
+        self.assertEqual(deleted.status_code, 200)
+        result = deleted.json()
+        self.assertTrue(Path(result["backup"]["path"]).is_file())
+        with closing(sqlite3.connect(result["backup"]["path"])) as snapshot:
+            saved = snapshot.execute("SELECT title FROM projects WHERE id=?", (project["id"],)).fetchone()
+        self.assertEqual(saved[0], "最终作品名")
+        self.assertNotIn(project["id"], [item["id"] for item in self.client.get("/projects", headers=headers).json()])
+        switched = self.client.post(
+            "/session/switch",
+            headers=headers,
+            json={"session_id": result["active_session_id"]},
+        )
+        self.assertEqual(switched.status_code, 200)
+
+        remaining_project = switched.json()["project_id"]
+        blocked = self.client.delete(f"/projects/{remaining_project}", headers=headers)
+        self.assertEqual(blocked.status_code, 400)
+        self.assertEqual(blocked.json()["detail"], "至少保留一个作品")
 
     def test_deleting_chapter_reports_affected_references(self) -> None:
         headers = {"Authorization": "Bearer test-agent-token"}

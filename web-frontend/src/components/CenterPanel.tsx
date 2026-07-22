@@ -58,6 +58,8 @@ type CenterPanelProps = {
   onMergeBranches: (source: string, target: string) => Promise<void>;
   onUpdateProjectSettings: (settings: Settings) => Promise<void>;
   onProjectStatus: (status: Project["status"]) => Promise<void>;
+  onRenameProject: (title: string) => Promise<void>;
+  onDeleteProject: () => Promise<void>;
 };
 
 const readText = (content: string) => {
@@ -138,6 +140,8 @@ export default function CenterPanel({
   onMergeBranches,
   onUpdateProjectSettings,
   onProjectStatus,
+  onRenameProject,
+  onDeleteProject,
 }: CenterPanelProps) {
   const selectedIds = useMaterialSelectionStore((state) => state.selectedIds);
   const [input, setInput] = useState("");
@@ -241,7 +245,7 @@ export default function CenterPanel({
           </div>
         </div>
         {activeTool && <div className="creator-toolbox-content">
-          {activeTool === "settings" && <ProjectSettings project={currentProject} onUpdate={onUpdateProjectSettings} onStatus={onProjectStatus} />}
+          {activeTool === "settings" && <ProjectSettings canDelete={projects.length > 1} disabled={generationLocked} project={currentProject} onDelete={onDeleteProject} onRename={onRenameProject} onUpdate={onUpdateProjectSettings} onStatus={onProjectStatus} />}
           {activeTool === "branches" && <BranchManager disabled={generationLocked} sessions={sessions} currentSessionId={activeSessionId} onCreate={onCreateBranch} onSwitch={onSwitchSession} onCompare={onCompareBranches} onMerge={onMergeBranches} />}
           {activeTool === "inspiration" && <InspirationGenerator projectId={projectId} apiConfig={apiConfig} onSelect={(value) => { setInput(value); setActiveTool(null); }} />}
         </div>}

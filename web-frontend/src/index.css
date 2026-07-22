@@ -3262,6 +3262,17 @@ button:disabled {
 .project-settings-bar input[type="number"] { width: 88px; }
 .project-settings-bar input[type="range"] { width: 76px; padding: 0; }
 
+.project-settings-bar .project-title-setting input {
+  width: 150px;
+}
+
+.project-settings-divider {
+  width: 1px;
+  height: 22px;
+  flex: none;
+  background: var(--line);
+}
+
 .project-settings-bar button,
 .story-structure button,
 .cross-bridge button {
@@ -3274,6 +3285,11 @@ button:disabled {
   background: var(--surface-strong);
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+
+.project-settings-bar .project-delete-button {
+  color: #f1aaaa;
+  border-color: rgba(211, 91, 91, 0.25);
 }
 
 .story-structure {

@@ -660,7 +660,8 @@ def rename_project(project_id: str, title: str) -> dict[str, Any]:
             if cursor.rowcount == 0:
                 raise ValueError("作品不存在")
             row = connection.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
-    return project_record(row)
+            active_id = get_app_state(connection, "current_project_id")
+    return project_record(row, active_id)
 
 
 def update_project_settings(project_id: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -676,7 +677,8 @@ def update_project_settings(project_id: str, settings: dict[str, Any]) -> dict[s
             current.update(settings)
             connection.execute("UPDATE projects SET settings=?,updated_at=? WHERE id=?", (json.dumps(current, ensure_ascii=False), now(), project_id))
             updated = connection.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
-    return project_record(updated)
+            active_id = get_app_state(connection, "current_project_id")
+    return project_record(updated, active_id)
 
 
 def set_project_status(project_id: str, status: str) -> dict[str, Any]:
@@ -688,7 +690,8 @@ def set_project_status(project_id: str, status: str) -> dict[str, Any]:
             if cursor.rowcount == 0:
                 raise ValueError("作品不存在")
             row = connection.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
-    return project_record(row)
+            active_id = get_app_state(connection, "current_project_id")
+    return project_record(row, active_id)
 
 
 def delete_project(project_id: str) -> str:
@@ -723,6 +726,16 @@ def delete_project(project_id: str) -> str:
             set_app_state(connection, "current_session_id", str(fallback["id"]))
             set_app_state(connection, "current_project_id", str(fallback["project_id"]))
     return str(fallback["id"])
+
+
+def delete_project_with_backup(project_id: str) -> dict[str, Any]:
+    with closing(connect()) as connection:
+        if not connection.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise ValueError("作品不存在")
+        if int(connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0]) <= 1:
+            raise ValueError("至少保留一个作品")
+    backup = create_database_backup(force=True)
+    return {"active_session_id": delete_project(project_id), "backup": backup}
 
 
 def list_sessions(project_id: str | None = None) -> list[dict[str, Any]]:

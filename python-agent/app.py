@@ -59,7 +59,7 @@ from database import (
     delete_chapter,
     delete_fact,
     delete_material,
-    delete_project,
+    delete_project_with_backup,
     delete_session,
     delete_story_node,
     delete_universe_rule,
@@ -433,9 +433,9 @@ async def project_status(project_id: str, request: ProjectStatusRequest) -> dict
 
 
 @app.delete("/projects/{project_id}")
-async def remove_project(project_id: str) -> dict[str, str]:
+async def remove_project(project_id: str) -> dict[str, Any]:
     try:
-        return {"active_session_id": await asyncio.to_thread(delete_project, project_id)}
+        return await asyncio.to_thread(delete_project_with_backup, project_id)
     except ValueError as error:
         raise as_http_error(error) from error
 
