@@ -983,6 +983,57 @@ button:disabled {
   box-shadow: 0 0 0 2px rgba(136, 120, 247, 0.08);
 }
 
+.generation-recovery-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  color: #e6d7a2;
+  background: rgba(126, 94, 28, 0.16);
+  border: 1px solid rgba(213, 172, 75, 0.28);
+  border-radius: 9px;
+}
+
+.generation-recovery-banner > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.generation-recovery-banner strong {
+  color: var(--text);
+  font-size: 0.64rem;
+}
+
+.generation-recovery-banner span {
+  overflow: hidden;
+  color: var(--muted-strong);
+  font-size: 0.57rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generation-recovery-banner button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  color: var(--muted-strong);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 0.58rem;
+}
+
+.generation-recovery-banner .resume-generation-button {
+  color: #fff;
+  background: var(--accent);
+  border-color: transparent;
+}
+
 .composer-workflow-actions {
   display: flex;
   align-items: center;

@@ -74,11 +74,12 @@ class BatchAutoCollectTests(unittest.TestCase):
             os.environ["NOVELFORGE_DB_PATH"] = self.previous_database
         self.temp_directory.cleanup()
 
-    def request(self, message: str) -> dict[str, list[dict[str, object]]]:
+    def request(self, message: str, request_id: str | None = None) -> dict[str, list[dict[str, object]]]:
         with TestClient(app_module.app) as client:
             response = client.post(
                 "/chat",
                 json={
+                    "request_id": request_id,
                     "session_id": self.session_id,
                     "project_id": self.project_id,
                     "message": message,
@@ -172,6 +173,140 @@ class BatchAutoCollectTests(unittest.TestCase):
         self.assertEqual(len(database.list_chapters(self.project_id)), 1)
         self.assertEqual(events["auto_collect_partial"][-1]["completed"], 1)
         self.assertTrue(events["done"][-1]["partial"])
+
+    def test_partial_task_resumes_without_duplicate_chapters(self) -> None:
+        command = "连续生成后面3章并自动收录，不用确认。"
+        task_id = "resume-three-chapters"
+        with (
+            patch.object(
+                app_module,
+                "create_paper_reply",
+                AsyncMock(side_effect=[paper_result(1, "甲"), app_module.AgentError("第二章连接中断")]),
+            ),
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+            patch.object(app_module, "analyze_impact", return_value=[]),
+        ):
+            first_events = self.request(command, task_id)
+        self.assertEqual(first_events["auto_collect_partial"][-1]["completed"], 1)
+        self.assertEqual(len(database.list_chapters(self.project_id)), 1)
+
+        with (
+            patch.object(
+                app_module,
+                "create_paper_reply",
+                AsyncMock(side_effect=[paper_result(2, "乙"), paper_result(3, "丙")]),
+            ) as resumed_create,
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+            patch.object(app_module, "analyze_impact", return_value=[]),
+        ):
+            resumed_events = self.request(command, task_id)
+        self.assertEqual(resumed_create.await_count, 2)
+        self.assertEqual(resumed_events["auto_collect_done"][-1]["completed"], 3)
+        chapters = database.list_chapters(self.project_id)
+        self.assertEqual([chapter["title"] for chapter in chapters], ["连续篇章1", "连续篇章2", "连续篇章3"])
+
+        with (
+            patch.object(app_module, "create_paper_reply", AsyncMock()) as duplicate_create,
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+        ):
+            recovered_events = self.request(command, task_id)
+        self.assertEqual(duplicate_create.await_count, 0)
+        self.assertTrue(recovered_events["done"][-1]["recovered"])
+        self.assertEqual(len(database.list_chapters(self.project_id)), 3)
+
+    def test_completed_single_generation_is_returned_without_model_replay(self) -> None:
+        command = "承接上一章生成下一章正式稿，先不要自动收录。"
+        task_id = "single-paper-idempotency"
+        with (
+            patch.object(app_module, "create_paper_reply", AsyncMock(return_value=paper_result(1, "甲"))) as create_mock,
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+        ):
+            first_events = self.request(command, task_id)
+        self.assertEqual(create_mock.await_count, 1)
+        self.assertEqual(len(first_events.get("paper", [])), 1)
+
+        with patch.object(app_module, "create_paper_reply", AsyncMock()) as replay_mock:
+            recovered_events = self.request(command, task_id)
+        self.assertEqual(replay_mock.await_count, 0)
+        self.assertTrue(recovered_events["done"][-1]["recovered"])
+        assistant_messages = [
+            message for message in database.list_messages(self.session_id) if message["role"] == "assistant"
+        ]
+        self.assertEqual(len(assistant_messages), 1)
+
+    def test_saved_batch_output_is_reused_after_precollection_crash(self) -> None:
+        command = "连续生成后面3章并自动收录，不用确认。"
+        task_id = "recover-saved-batch-output"
+        with (
+            patch.object(app_module, "create_paper_reply", AsyncMock(return_value=paper_result(1, "甲"))) as first_create,
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+            patch.object(app_module, "confirm_paper", side_effect=RuntimeError("模拟收录前退出")),
+        ):
+            first_events = self.request(command, task_id)
+        self.assertEqual(first_create.await_count, 1)
+        self.assertIn("error", first_events)
+        self.assertEqual(len(database.list_chapters(self.project_id)), 0)
+
+        with (
+            patch.object(
+                app_module,
+                "create_paper_reply",
+                AsyncMock(side_effect=[paper_result(2, "乙"), paper_result(3, "丙")]),
+            ) as resumed_create,
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+            patch.object(app_module, "analyze_impact", return_value=[]),
+        ):
+            resumed_events = self.request(command, task_id)
+        self.assertEqual(resumed_create.await_count, 2)
+        self.assertEqual(resumed_events["auto_collect_done"][-1]["completed"], 3)
+        chapters = database.list_chapters(self.project_id)
+        self.assertEqual([chapter["title"] for chapter in chapters], ["连续篇章1", "连续篇章2", "连续篇章3"])
+
+    def test_collected_chapter_progress_survives_postcollection_crash(self) -> None:
+        command = "连续生成后面3章并自动收录，不用确认。"
+        task_id = "recover-collected-batch-output"
+        with (
+            patch.object(app_module, "create_paper_reply", AsyncMock(return_value=paper_result(1, "甲"))),
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+            patch.object(app_module, "analyze_impact", side_effect=RuntimeError("模拟收录后退出")),
+        ):
+            first_events = self.request(command, task_id)
+        self.assertEqual(first_events["auto_collect_partial"][-1]["completed"], 1)
+        self.assertEqual(len(database.list_chapters(self.project_id)), 1)
+
+        with (
+            patch.object(
+                app_module,
+                "create_paper_reply",
+                AsyncMock(side_effect=[paper_result(2, "乙"), paper_result(3, "丙")]),
+            ) as resumed_create,
+            patch.object(app_module, "validate_universe_with_model", AsyncMock(return_value=[])),
+            patch.object(app_module, "analyze_impact", return_value=[]),
+        ):
+            resumed_events = self.request(command, task_id)
+        self.assertEqual(resumed_create.await_count, 2)
+        self.assertEqual(resumed_events["auto_collect_done"][-1]["completed"], 3)
+        self.assertEqual(len(database.list_chapters(self.project_id)), 3)
+
+    def test_recoverable_task_can_be_listed_and_abandoned(self) -> None:
+        command = "生成下一章正式稿。"
+        task_id = "recoverable-task-api"
+        with patch.object(app_module, "create_paper_reply", AsyncMock(side_effect=app_module.AgentError("模型暂时不可用"))):
+            events = self.request(command, task_id)
+        self.assertIn("error", events)
+
+        with TestClient(app_module.app) as client:
+            response = client.get("/generation/tasks", params={"session_id": self.session_id})
+            response.raise_for_status()
+            tasks = response.json()
+            self.assertEqual([task["id"] for task in tasks], [task_id])
+            self.assertEqual(tasks[0]["request_payload"]["message"], command)
+            self.assertNotIn("api_config", tasks[0]["request_payload"])
+
+            abandoned = client.delete(f"/generation/tasks/{task_id}")
+            self.assertEqual(abandoned.status_code, 200)
+            self.assertEqual(client.get("/generation/tasks", params={"session_id": self.session_id}).json(), [])
+            self.assertEqual(client.delete(f"/generation/tasks/{task_id}").status_code, 404)
 
 
 if __name__ == "__main__":

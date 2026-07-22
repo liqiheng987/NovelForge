@@ -38,12 +38,15 @@ from agent import (
 )
 from database import (
     abandon_paper,
+    abandon_generation_task,
     analyze_impact,
+    begin_generation_task,
     branch_compare,
     branch_merge,
     chapter_summaries,
     chat_history,
     confirm_paper,
+    complete_generation_task,
     clear_chapter_draft,
     create_branch,
     create_database_backup,
@@ -63,6 +66,7 @@ from database import (
     delete_user_message,
     edit_chapter,
     get_paper,
+    get_message,
     get_chapter_draft,
     get_chapter_project,
     get_project_for_session,
@@ -73,6 +77,7 @@ from database import (
     list_deleted_chapters,
     list_facts,
     list_impacts,
+    list_recoverable_generation_tasks,
     list_material_tree,
     list_messages,
     list_pinned_materials,
@@ -86,12 +91,15 @@ from database import (
     rename_project,
     reorder_story_nodes,
     reorder_chapters,
+    record_generation_progress,
     restore_chapter_version,
     purge_deleted_chapter,
     resolve_impact,
     save_assistant_message,
     save_chapter_draft,
     save_user_message,
+    set_generation_task_stage,
+    set_generation_task_user_message,
     store_analysis,
     switch_project,
     switch_session,
@@ -103,6 +111,7 @@ from database import (
     update_universe_rule,
     upsert_fact,
     copy_story_node,
+    interrupt_generation_task,
 )
 from models import (
     AnalyzeRequest,
@@ -751,11 +760,14 @@ async def compliance_check(request: ComplianceCheckRequest) -> dict[str, Any]:
 
 async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
     assistant_id = request.regenerate_assistant_id or str(uuid4())
+    task_id = request.request_id
+    generation_task: dict[str, Any] | None = None
     user_message: dict[str, Any] | None = None
     completed = False
     auto_collected: list[dict[str, Any]] = []
     affected_nodes: list[dict[str, Any]] = []
     last_saved_message: dict[str, Any] | None = None
+    total_completed = 0
 
     async def rollback_user_message() -> None:
         nonlocal user_message
@@ -778,15 +790,114 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
         mode = str(inferred_mode or (request.mode.value if request.mode else (session or {}).get("mode") or "guided"))
         if request.mode or inferred_mode:
             await asyncio.to_thread(update_session_mode, request.session_id, mode)
+        auto_collect_count = (
+            requested_auto_collect_count(request.message)
+            if not request.paper_source_message_id and request.creation_action != "modify"
+            else 0
+        )
+        if task_id:
+            request_payload = {
+                "message": request.message,
+                "selected_material_ids": request.selected_material_ids,
+                "paper_source_message_id": request.paper_source_message_id,
+                "regenerate_assistant_id": request.regenerate_assistant_id,
+                "creation_action": request.creation_action,
+                "chapter_target_words": request.chapter_target_words,
+                "mode": request.mode.value if request.mode else None,
+            }
+            generation_task = await asyncio.to_thread(
+                begin_generation_task,
+                task_id,
+                request.session_id,
+                project_id,
+                assistant_id,
+                request_payload,
+                auto_collect_count or 1,
+            )
+            assistant_id = str(generation_task["assistant_message_id"])
+            total_completed = int(generation_task["completed_count"])
+            message_ids = list(generation_task["message_ids"])
+            if message_ids:
+                last_saved_message = await asyncio.to_thread(get_message, str(message_ids[-1]))
+            if generation_task.get("resumed") and assistant_id not in message_ids:
+                recovered_message = await asyncio.to_thread(get_message, assistant_id)
+                if recovered_message:
+                    if auto_collect_count:
+                        recovered_paper = recovered_message.get("paper")
+                        if not recovered_paper or recovered_paper.get("status") == "abandoned":
+                            raise AgentError("未完成任务的篇章稿纸不可恢复")
+                        if recovered_paper.get("status") != "collected":
+                            confirmed = await asyncio.to_thread(confirm_paper, assistant_id, task_id)
+                            await asyncio.to_thread(
+                                analyze_impact,
+                                project_id,
+                                confirmed["chapter"]["id"],
+                                "insert",
+                            )
+                        chapter_id = str((await asyncio.to_thread(get_paper, assistant_id) or {}).get("chapter_id") or "")
+                        if not chapter_id:
+                            raise AgentError("未完成任务的已生成篇章无法定位")
+                        generation_task = await asyncio.to_thread(
+                            record_generation_progress,
+                            task_id,
+                            assistant_id,
+                            chapter_id,
+                        )
+                        total_completed = int(generation_task["completed_count"])
+                        last_saved_message = await asyncio.to_thread(get_message, assistant_id)
+                    else:
+                        generation_task = await asyncio.to_thread(complete_generation_task, task_id, assistant_id)
+                        last_saved_message = recovered_message
+            if generation_task["status"] == "completed":
+                if not last_saved_message:
+                    raise AgentError("已完成任务的回复记录不存在")
+                yield sse(
+                    "start",
+                    {
+                        "assistant_message_id": last_saved_message["id"],
+                        "user_message": None,
+                        "generation_task_id": task_id,
+                        "resumed": True,
+                        "completed_count": total_completed,
+                    },
+                )
+                yield sse("stage", {"code": "recovered", "message": "任务已完成，正在恢复生成结果…"})
+                if total_completed:
+                    yield sse(
+                        "auto_collect_done",
+                        {
+                            "completed": total_completed,
+                            "total": int(generation_task["batch_total"]),
+                            "chapter_ids": generation_task["chapter_ids"],
+                        },
+                    )
+                completed = True
+                yield sse("done", {"message": last_saved_message, "auto_collected": total_completed, "recovered": True})
+                return
         yield sse("mode", {"mode": mode, "description": MODE_DESCRIPTIONS[mode], "prompt": get_mode_prompt(mode)})
         yield sse("workflow", {"settings": (project or {}).get("settings", {}), "guidance": workflow_prompt((project or {}).get("settings", {}))})
         history = await asyncio.to_thread(chat_history, request.session_id, 40, request.regenerate_assistant_id)
         if history and history[-1]["role"] == "user" and history[-1]["content"] == request.message:
             history = history[:-1]
-        if not request.regenerate_assistant_id:
+        if generation_task and generation_task.get("user_message_id"):
+            user_message = await asyncio.to_thread(get_message, str(generation_task["user_message_id"]))
+        if not request.regenerate_assistant_id and not user_message:
             user_message = await asyncio.to_thread(save_user_message, request.session_id, request.message, request.selected_material_ids)
-        yield sse("start", {"assistant_message_id": assistant_id, "user_message": user_message})
+            if task_id:
+                await asyncio.to_thread(set_generation_task_user_message, task_id, str(user_message["id"]))
+        yield sse(
+            "start",
+            {
+                "assistant_message_id": assistant_id,
+                "user_message": user_message if not generation_task or not generation_task.get("resumed") else None,
+                "generation_task_id": task_id,
+                "resumed": bool(generation_task and generation_task.get("resumed")),
+                "completed_count": total_completed,
+            },
+        )
         yield sse("stage", {"code": "context", "message": "正在整理素材、作品记忆和最近对话…"})
+        if task_id:
+            await asyncio.to_thread(set_generation_task_stage, task_id, "context")
         temporary_context, permanent_context, memory_context = await asyncio.gather(
             asyncio.to_thread(material_context, request.selected_material_ids),
             asyncio.to_thread(pinned_context, project_id),
@@ -794,11 +905,6 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
         )
         context = "\n\n".join(part for part in (temporary_context, permanent_context) if part)
         memory_context = "\n\n".join(part for part in (memory_context, workflow_prompt((project or {}).get("settings", {}))) if part)
-        auto_collect_count = (
-            requested_auto_collect_count(request.message)
-            if not request.paper_source_message_id and request.creation_action != "modify"
-            else 0
-        )
         whole_novel_plan = requests_whole_novel(request.message) and request.creation_action in {"auto", "create"} and not auto_collect_count
         if whole_novel_plan:
             intent = {"should_create": False, "mode": "create", "reason": "超长小说改为分章规划"}
@@ -818,11 +924,36 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                 generation_action = "continue"
             source_paper = await asyncio.to_thread(get_paper, request.paper_source_message_id) if request.paper_source_message_id else None
             batch_count = auto_collect_count or 1
+            resume_from = total_completed if auto_collect_count else 0
             if auto_collect_count:
                 yield sse("auto_collect_start", {"total": batch_count, "limit": 10})
-            for batch_index in range(batch_count):
+                if resume_from:
+                    yield sse(
+                        "stage",
+                        {
+                            "code": "resuming",
+                            "message": f"已安全恢复前 {resume_from}/{batch_count} 章，将从下一章继续…",
+                        },
+                    )
+            if auto_collect_count and resume_from >= batch_count:
+                if task_id:
+                    generation_task = await asyncio.to_thread(complete_generation_task, task_id)
+                if not last_saved_message:
+                    raise AgentError("已收录章节的回复记录不存在")
+                completed = True
+                yield sse(
+                    "auto_collect_done",
+                    {
+                        "completed": resume_from,
+                        "total": batch_count,
+                        "chapter_ids": generation_task["chapter_ids"] if generation_task else [],
+                    },
+                )
+                yield sse("done", {"message": last_saved_message, "auto_collected": resume_from, "recovered": True})
+                return
+            for batch_index in range(resume_from, batch_count):
                 current_number = batch_index + 1
-                current_assistant_id = assistant_id if batch_index == 0 else str(uuid4())
+                current_assistant_id = assistant_id if batch_index == resume_from else str(uuid4())
                 current_action = generation_action if batch_index == 0 else "continue"
                 current_command = request.message
                 if auto_collect_count:
@@ -838,6 +969,13 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                         "message": f"正在生成并核对第 {current_number}/{batch_count} 章…" if auto_collect_count else "正在核对连续性并生成完整篇章…",
                     },
                 )
+                if task_id:
+                    await asyncio.to_thread(
+                        set_generation_task_stage,
+                        task_id,
+                        f"writing_{current_number}",
+                        current_assistant_id,
+                    )
                 retry_delays = (5, 15, 30)
                 chapter_retry_delays = (1, 3, 8)
                 result: dict[str, Any] | None = None
@@ -900,6 +1038,8 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                         "message": f"正在校验并收录第 {current_number}/{batch_count} 章…" if auto_collect_count else "正在检查长度、宇宙铁律和篇章记忆…",
                     },
                 )
+                if task_id:
+                    await asyncio.to_thread(set_generation_task_stage, task_id, f"validating_{current_number}")
                 current_conflicts: list[dict[str, str]] | None = None
                 for retry_index in range(len(retry_delays) + 1):
                     try:
@@ -948,7 +1088,7 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                     current_assistant_id,
                 )
                 if auto_collect_count:
-                    confirmed = await asyncio.to_thread(confirm_paper, current_assistant_id)
+                    confirmed = await asyncio.to_thread(confirm_paper, current_assistant_id, task_id)
                     affected = await asyncio.to_thread(analyze_impact, project_id, confirmed["chapter"]["id"], "insert")
                     affected_nodes.extend(affected)
                     last_saved_message = next(
@@ -963,6 +1103,15 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                             "affected_nodes": affected,
                         }
                     )
+                    total_completed = current_number
+                    if task_id:
+                        generation_task = await asyncio.to_thread(
+                            record_generation_progress,
+                            task_id,
+                            current_assistant_id,
+                            confirmed["chapter"]["id"],
+                        )
+                        total_completed = int(generation_task["completed_count"])
                     yield sse(
                         "auto_collected",
                         {
@@ -975,18 +1124,24 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                         },
                     )
                 else:
+                    if task_id:
+                        generation_task = await asyncio.to_thread(
+                            complete_generation_task, task_id, current_assistant_id
+                        )
                     for index in range(0, len(result["text"]), 4):
                         yield sse("delta", {"content": result["text"][index : index + 4]})
                         await asyncio.sleep(0.02)
                     yield sse("paper", {"message_id": current_assistant_id, "paper": result["paper"]})
             message = last_saved_message
             if auto_collect_count:
+                if task_id:
+                    generation_task = await asyncio.to_thread(complete_generation_task, task_id)
                 yield sse(
                     "auto_collect_done",
                     {
-                        "completed": len(auto_collected),
+                        "completed": total_completed,
                         "total": batch_count,
-                        "chapter_ids": [item["chapter"]["id"] for item in auto_collected],
+                        "chapter_ids": generation_task["chapter_ids"] if generation_task else [item["chapter"]["id"] for item in auto_collected],
                     },
                 )
         else:
@@ -1013,50 +1168,93 @@ async def chat_events(request: ChatRequest) -> AsyncIterator[str]:
                 raise AgentError("模型没有返回内容，请重试")
             message = await asyncio.to_thread(save_assistant_message, request.session_id, content, None, assistant_id)
             last_saved_message = message
+            if task_id:
+                generation_task = await asyncio.to_thread(complete_generation_task, task_id, assistant_id)
         yield sse("impact", {"affected_nodes": affected_nodes, "conflicts": conflicts})
         completed = True
         yield sse("stage", {"code": "done", "message": "本轮创作已完成"})
-        yield sse("done", {"message": message, "auto_collected": len(auto_collected)})
+        yield sse(
+            "done",
+            {
+                "message": message,
+                "auto_collected": total_completed if auto_collect_count else len(auto_collected),
+                "generation_task_id": task_id,
+            },
+        )
+    except asyncio.CancelledError:
+        if task_id and generation_task:
+            await asyncio.to_thread(interrupt_generation_task, task_id, "生成连接已中断，可继续此任务")
+        completed = bool(task_id and generation_task)
+        raise
     except (AgentError, ValueError) as error:
         logger.warning("chat rejected session=%s reason=%s", request.session_id, error)
-        if auto_collected and last_saved_message:
+        if task_id and generation_task:
+            generation_task = await asyncio.to_thread(interrupt_generation_task, task_id, str(error), True)
+            total_completed = int((generation_task or {}).get("completed_count", total_completed))
+        if total_completed and last_saved_message:
             completed = True
             yield sse(
                 "auto_collect_partial",
                 {
-                    "completed": len(auto_collected),
+                    "completed": total_completed,
                     "total": requested_auto_collect_count(request.message),
                     "message": str(error),
+                    "generation_task_id": task_id,
                 },
             )
-            yield sse("done", {"message": last_saved_message, "auto_collected": len(auto_collected), "partial": True})
+            yield sse("done", {"message": last_saved_message, "auto_collected": total_completed, "partial": True, "generation_task_id": task_id})
         else:
-            await rollback_user_message()
-            yield sse("error", {"message": str(error)})
+            if not generation_task:
+                await rollback_user_message()
+            yield sse("error", {"message": str(error), "generation_task_id": task_id, "recoverable": bool(generation_task)})
     except Exception:
         logger.exception("chat failed session=%s", request.session_id)
-        if auto_collected and last_saved_message:
+        if task_id and generation_task:
+            generation_task = await asyncio.to_thread(
+                interrupt_generation_task,
+                task_id,
+                "生成过程出现异常，可安全重试此任务",
+                True,
+            )
+            total_completed = int((generation_task or {}).get("completed_count", total_completed))
+        if total_completed and last_saved_message:
             completed = True
             yield sse(
                 "auto_collect_partial",
                 {
-                    "completed": len(auto_collected),
+                    "completed": total_completed,
                     "total": requested_auto_collect_count(request.message),
                     "message": "后续篇章生成失败，请从已收录的最后一章继续",
+                    "generation_task_id": task_id,
                 },
             )
-            yield sse("done", {"message": last_saved_message, "auto_collected": len(auto_collected), "partial": True})
+            yield sse("done", {"message": last_saved_message, "auto_collected": total_completed, "partial": True, "generation_task_id": task_id})
         else:
-            await rollback_user_message()
-            yield sse("error", {"message": "对话生成失败，请检查模型设置后重试"})
+            if not generation_task:
+                await rollback_user_message()
+            yield sse("error", {"message": "对话生成失败，请检查模型设置后重试", "generation_task_id": task_id, "recoverable": bool(generation_task)})
     finally:
-        if not completed:
+        if not completed and not generation_task:
             await rollback_user_message()
 
 
 @app.post("/chat")
 async def chat(request: ChatRequest) -> StreamingResponse:
     return StreamingResponse(chat_events(request), media_type="text/event-stream", headers=stream_headers())
+
+
+@app.get("/generation/tasks")
+async def generation_tasks(session_id: str = Query(min_length=1)) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(list_recoverable_generation_tasks, session_id)
+
+
+@app.delete("/generation/tasks/{task_id}")
+async def generation_task_abandon(task_id: str) -> dict[str, str]:
+    try:
+        await asyncio.to_thread(abandon_generation_task, task_id)
+        return {"status": "ok"}
+    except ValueError as error:
+        raise as_http_error(error, 404) from error
 
 
 @app.get("/chapters")

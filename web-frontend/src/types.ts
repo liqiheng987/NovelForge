@@ -42,6 +42,32 @@ export type Paper = {
 
 export type CreationAction = "auto" | "discuss" | "create" | "continue" | "modify";
 
+export type GenerationTask = {
+  id: string;
+  session_id: string;
+  project_id: string;
+  user_message_id: string | null;
+  assistant_message_id: string;
+  request_payload: {
+    message: string;
+    selected_material_ids: string[];
+    paper_source_message_id: string | null;
+    regenerate_assistant_id: string | null;
+    creation_action: CreationAction;
+    chapter_target_words: number | null;
+    mode: Mode | null;
+  };
+  status: "running" | "interrupted" | "partial" | "failed" | "completed" | "abandoned";
+  stage: string;
+  batch_total: number;
+  completed_count: number;
+  message_ids: string[];
+  chapter_ids: string[];
+  error: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ChatMessage = {
   id: string;
   session_id: string;

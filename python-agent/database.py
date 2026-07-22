@@ -318,6 +318,26 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS generation_tasks (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            user_message_id TEXT,
+            assistant_message_id TEXT NOT NULL,
+            request_payload TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('running','interrupted','partial','failed','completed','abandoned')),
+            stage TEXT NOT NULL DEFAULT 'preparing',
+            batch_total INTEGER NOT NULL DEFAULT 1,
+            completed_count INTEGER NOT NULL DEFAULT 0,
+            message_ids TEXT NOT NULL DEFAULT '[]',
+            chapter_ids TEXT NOT NULL DEFAULT '[]',
+            error TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS pinned_materials (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -439,6 +459,7 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_chapter_versions_chapter ON chapter_versions(chapter_id,created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_chapter_versions_trash ON chapter_versions(project_id,event_type,restored_at,created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_chapter_drafts_project ON chapter_drafts(project_id,updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_generation_tasks_session ON generation_tasks(session_id,status,updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_pinned_project ON pinned_materials(project_id,priority);
         CREATE INDEX IF NOT EXISTS idx_universe_project ON universe_rules(project_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_fact_project_category ON fact_tables(project_id,category);
@@ -446,6 +467,17 @@ def migrate_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_story_project_layer ON story_nodes(project_id,layer,sort_order);
         CREATE INDEX IF NOT EXISTS idx_story_parent ON story_nodes(parent_id,sort_order);
         """
+    )
+    connection.execute(
+        """
+        UPDATE generation_tasks
+        SET status=CASE WHEN completed_count>0 THEN 'partial' ELSE 'interrupted' END,
+            stage='interrupted',
+            error=CASE WHEN error='' THEN '应用在生成过程中关闭，可继续此任务' ELSE error END,
+            updated_at=?
+        WHERE status='running'
+        """,
+        (now(),),
     )
 
 
@@ -918,6 +950,215 @@ def list_messages(session_id: str, limit: int = 200) -> list[dict[str, Any]]:
             (session_id, limit),
         ).fetchall()
     return [message_record(row) for row in rows]
+
+
+def get_message(message_id: str) -> dict[str, Any] | None:
+    with closing(connect()) as connection:
+        row = connection.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+    return message_record(row) if row else None
+
+
+def generation_task_record(row: sqlite3.Row) -> dict[str, Any]:
+    record = dict(row)
+    for field, fallback in (("request_payload", {}), ("message_ids", []), ("chapter_ids", [])):
+        try:
+            value = json.loads(record.get(field) or "")
+        except (json.JSONDecodeError, TypeError):
+            value = fallback
+        record[field] = value if isinstance(value, type(fallback)) else fallback
+    return record
+
+
+def begin_generation_task(
+    task_id: str,
+    session_id: str,
+    project_id: str,
+    assistant_message_id: str,
+    request_payload: dict[str, Any],
+    batch_total: int,
+) -> dict[str, Any]:
+    payload_json = json.dumps(request_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    with closing(connect()) as connection:
+        with connection:
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+            resumed = row is not None
+            if row:
+                record = generation_task_record(row)
+                stored_payload = json.dumps(
+                    record["request_payload"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                if record["session_id"] != session_id or record["project_id"] != project_id or stored_payload != payload_json:
+                    raise ValueError("生成任务标识与原始请求不匹配")
+                if record["status"] == "running":
+                    raise ValueError("该生成任务仍在运行，请稍后再试")
+                if record["status"] == "abandoned":
+                    raise ValueError("该生成任务已放弃")
+                if record["status"] == "completed":
+                    record["resumed"] = True
+                    return record
+                active_assistant_id = str(record["assistant_message_id"])
+                if active_assistant_id in record["message_ids"]:
+                    active_assistant_id = assistant_message_id
+                connection.execute(
+                    """
+                    UPDATE generation_tasks
+                    SET assistant_message_id=?,status='running',stage='resuming',error='',updated_at=?
+                    WHERE id=?
+                    """,
+                    (active_assistant_id, now(), task_id),
+                )
+            else:
+                timestamp = now()
+                connection.execute(
+                    """
+                    INSERT INTO generation_tasks (
+                        id,session_id,project_id,user_message_id,assistant_message_id,request_payload,
+                        status,stage,batch_total,completed_count,message_ids,chapter_ids,error,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,'running','preparing',?,0,'[]','[]','',?,?)
+                    """,
+                    (
+                        task_id,
+                        session_id,
+                        project_id,
+                        None,
+                        assistant_message_id,
+                        payload_json,
+                        batch_total,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+    record = generation_task_record(row)
+    record["resumed"] = resumed
+    return record
+
+
+def set_generation_task_user_message(task_id: str, user_message_id: str) -> None:
+    with closing(connect()) as connection:
+        with connection:
+            connection.execute(
+                "UPDATE generation_tasks SET user_message_id=?,updated_at=? WHERE id=?",
+                (user_message_id, now(), task_id),
+            )
+
+
+def set_generation_task_stage(task_id: str, stage: str, assistant_message_id: str | None = None) -> None:
+    with closing(connect()) as connection:
+        with connection:
+            if assistant_message_id:
+                connection.execute(
+                    """
+                    UPDATE generation_tasks SET stage=?,assistant_message_id=?,updated_at=?
+                    WHERE id=? AND status='running'
+                    """,
+                    (stage[:80], assistant_message_id, now(), task_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE generation_tasks SET stage=?,updated_at=? WHERE id=? AND status='running'",
+                    (stage[:80], now(), task_id),
+                )
+
+
+def record_generation_progress(task_id: str, message_id: str, chapter_id: str) -> dict[str, Any]:
+    with closing(connect()) as connection:
+        with connection:
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                raise ValueError("生成任务不存在")
+            record = generation_task_record(row)
+            message_ids = list(record["message_ids"])
+            chapter_ids = list(record["chapter_ids"])
+            if chapter_id not in chapter_ids:
+                chapter_ids.append(chapter_id)
+            if message_id not in message_ids:
+                message_ids.append(message_id)
+            connection.execute(
+                """
+                UPDATE generation_tasks
+                SET completed_count=?,message_ids=?,chapter_ids=?,stage='chapter_saved',updated_at=?
+                WHERE id=?
+                """,
+                (
+                    len(chapter_ids),
+                    json.dumps(message_ids, ensure_ascii=False),
+                    json.dumps(chapter_ids, ensure_ascii=False),
+                    now(),
+                    task_id,
+                ),
+            )
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+    return generation_task_record(row)
+
+
+def complete_generation_task(task_id: str, message_id: str | None = None) -> dict[str, Any]:
+    with closing(connect()) as connection:
+        with connection:
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                raise ValueError("生成任务不存在")
+            record = generation_task_record(row)
+            message_ids = list(record["message_ids"])
+            if message_id and message_id not in message_ids:
+                message_ids.append(message_id)
+            connection.execute(
+                """
+                UPDATE generation_tasks
+                SET status='completed',stage='done',message_ids=?,error='',updated_at=?
+                WHERE id=?
+                """,
+                (json.dumps(message_ids, ensure_ascii=False), now(), task_id),
+            )
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+    return generation_task_record(row)
+
+
+def interrupt_generation_task(task_id: str, error: str, failed: bool = False) -> dict[str, Any] | None:
+    with closing(connect()) as connection:
+        with connection:
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                return None
+            record = generation_task_record(row)
+            if record["status"] in {"completed", "abandoned"}:
+                return record
+            status = "partial" if int(record["completed_count"]) > 0 else "failed" if failed else "interrupted"
+            connection.execute(
+                """
+                UPDATE generation_tasks SET status=?,stage='interrupted',error=?,updated_at=? WHERE id=?
+                """,
+                (status, error[:2000], now(), task_id),
+            )
+            row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (task_id,)).fetchone()
+    return generation_task_record(row)
+
+
+def list_recoverable_generation_tasks(session_id: str) -> list[dict[str, Any]]:
+    with closing(connect()) as connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM generation_tasks
+            WHERE session_id=? AND status IN ('interrupted','partial','failed')
+            ORDER BY updated_at DESC
+            """,
+            (session_id,),
+        ).fetchall()
+    return [generation_task_record(row) for row in rows]
+
+
+def abandon_generation_task(task_id: str) -> None:
+    with closing(connect()) as connection:
+        with connection:
+            cursor = connection.execute(
+                """
+                UPDATE generation_tasks SET status='abandoned',stage='abandoned',updated_at=?
+                WHERE id=? AND status IN ('interrupted','partial','failed')
+                """,
+                (now(), task_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("可恢复的生成任务不存在")
 
 
 def paper_history_context(paper: dict[str, Any]) -> str:
@@ -1431,7 +1672,7 @@ def rebuild_project_chapter_facts(connection: sqlite3.Connection, project_id: st
             )
 
 
-def confirm_paper(message_id: str) -> dict[str, Any]:
+def confirm_paper(message_id: str, generation_task_id: str | None = None) -> dict[str, Any]:
     with closing(connect()) as connection:
         with connection:
             row = connection.execute("SELECT * FROM messages WHERE id=? AND has_paper=1", (message_id,)).fetchone()
@@ -1442,6 +1683,19 @@ def confirm_paper(message_id: str) -> dict[str, Any]:
             if not paper or paper.get("status") == "abandoned":
                 raise ValueError("已放弃的稿纸不能收录")
             project_id = str(connection.execute("SELECT project_id FROM sessions WHERE id=?", (record["session_id"],)).fetchone()[0])
+            generation_task = None
+            if generation_task_id:
+                task_row = connection.execute("SELECT * FROM generation_tasks WHERE id=?", (generation_task_id,)).fetchone()
+                if not task_row:
+                    raise ValueError("生成任务不存在")
+                generation_task = generation_task_record(task_row)
+                if (
+                    generation_task["status"] != "running"
+                    or generation_task["session_id"] != record["session_id"]
+                    or generation_task["project_id"] != project_id
+                    or generation_task["assistant_message_id"] != message_id
+                ):
+                    raise ValueError("生成任务状态与待收录稿纸不匹配")
             target_id = paper.get("target_chapter_id") or paper.get("chapter_id")
             timestamp = now()
             chapter_memory = normalize_chapter_memory(paper.get("memory"), str(paper["content"]))
@@ -1467,6 +1721,27 @@ def confirm_paper(message_id: str) -> dict[str, Any]:
             rebuild_project_chapter_facts(connection, project_id)
             paper.update({"status": "collected", "chapter_id": chapter_id, "memory": chapter_memory})
             connection.execute("UPDATE messages SET content=? WHERE id=?", (json.dumps({"text": record["content"], "paper": paper}, ensure_ascii=False), message_id))
+            if generation_task:
+                message_ids = list(generation_task["message_ids"])
+                chapter_ids = list(generation_task["chapter_ids"])
+                if message_id not in message_ids:
+                    message_ids.append(message_id)
+                if chapter_id not in chapter_ids:
+                    chapter_ids.append(chapter_id)
+                connection.execute(
+                    """
+                    UPDATE generation_tasks
+                    SET completed_count=?,message_ids=?,chapter_ids=?,stage='chapter_saved',updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        len(chapter_ids),
+                        json.dumps(message_ids, ensure_ascii=False),
+                        json.dumps(chapter_ids, ensure_ascii=False),
+                        now(),
+                        generation_task_id,
+                    ),
+                )
             chapter = connection.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone()
     return {
         "chapter": chapter_record(chapter),
